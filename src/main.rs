@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)]
+
 use bevy::asset::LoadState;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
