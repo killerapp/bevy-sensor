@@ -591,7 +591,9 @@ dependencies = [
  "bevy_app",
  "bevy_asset",
  "bevy_ecs",
+ "bevy_pbr",
  "bevy_render",
+ "bevy_scene",
  "bevy_utils",
  "thiserror",
  "tobj",
@@ -3030,6 +3032,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04aca6092e5978e708ee784e8ab9b5cf3cdb598b28f99a2f257446e7081a7025"
 dependencies = [
  "ahash",
+ "log",
 ]
 
 [[package]]

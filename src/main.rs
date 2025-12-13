@@ -1,8 +1,8 @@
-use bevy::prelude::*;
 use bevy::asset::LoadState;
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::prelude::*;
 use bevy::render::view::screenshot::ScreenshotManager;
 use bevy::window::PrimaryWindow;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy_obj::ObjPlugin;
 use std::f32::consts::PI;
 
@@ -87,7 +87,7 @@ struct CaptureState {
     view_index: usize,
     frame_counter: u32,
     step: CaptureStep,
-    startup_frames: u32,  // Wait for assets to load
+    startup_frames: u32, // Wait for assets to load
 }
 
 #[derive(Resource)]
@@ -102,7 +102,7 @@ struct MaterialsReplaced(bool);
 #[derive(Default)]
 enum CaptureStep {
     #[default]
-    WaitForAssets,  // Initial state - wait for textures to load
+    WaitForAssets, // Initial state - wait for textures to load
     SetupView,
     WaitSettle,
     Capture,
@@ -117,13 +117,11 @@ fn setup(
 ) {
     // Camera - spawned with initial transform, will be moved by system
     // Disable tonemapping for software rendering compatibility
-    commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
-            tonemapping: Tonemapping::None,
-            ..default()
-        },
-    ));
+    commands.spawn((Camera3dBundle {
+        transform: Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
+        tonemapping: Tonemapping::None,
+        ..default()
+    },));
 
     // Light
     commands.spawn(PointLightBundle {
@@ -143,8 +141,10 @@ fn setup(
     });
 
     // Load scene (for geometry) and texture separately
-    let scene_handle: Handle<Scene> = asset_server.load("ycb/003_cracker_box/google_16k/textured.obj");
-    let texture_handle: Handle<Image> = asset_server.load("ycb/003_cracker_box/google_16k/texture_map.png");
+    let scene_handle: Handle<Scene> =
+        asset_server.load("ycb/003_cracker_box/google_16k/textured.obj");
+    let texture_handle: Handle<Image> =
+        asset_server.load("ycb/003_cracker_box/google_16k/texture_map.png");
 
     println!("Loading scene from: ycb/003_cracker_box/google_16k/textured.obj");
     println!("Loading texture from: ycb/003_cracker_box/google_16k/texture_map.png");
@@ -152,7 +152,7 @@ fn setup(
     // Create unlit material with the texture
     let textured_material = materials.add(StandardMaterial {
         base_color_texture: Some(texture_handle.clone()),
-        unlit: true,  // Unlit so texture colors are accurate
+        unlit: true, // Unlit so texture colors are accurate
         ..default()
     });
 
@@ -180,7 +180,9 @@ fn replace_materials(
     state: Res<CaptureState>,
 ) {
     // Wait for texture to be loaded
-    let Some(tex_handle) = texture_handle else { return };
+    let Some(tex_handle) = texture_handle else {
+        return;
+    };
     let load_state = asset_server.get_load_state(&tex_handle.0);
     if load_state != LoadState::Loaded {
         return;
@@ -200,8 +202,10 @@ fn replace_materials(
     let mat_entity_count = mesh_query.iter().count();
 
     if state.startup_frames % 30 == 0 {
-        println!("DEBUG: {} total entities, {} with mesh, {} with mesh+material",
-                 total_entities, mesh_entity_count, mat_entity_count);
+        println!(
+            "DEBUG: {} total entities, {} with mesh, {} with mesh+material",
+            total_entities, mesh_entity_count, mat_entity_count
+        );
     }
 
     // Replace all materials
@@ -236,7 +240,10 @@ fn capture_sequence(
             if let Some(handle) = &texture_handle {
                 let load_state = asset_server.get_load_state(&handle.0);
                 if state.startup_frames % 30 == 0 {
-                    println!("Frame {}: Texture load state: {:?}", state.startup_frames, load_state);
+                    println!(
+                        "Frame {}: Texture load state: {:?}",
+                        state.startup_frames, load_state
+                    );
                 }
 
                 match load_state {
@@ -249,7 +256,10 @@ fn capture_sequence(
                         if state.startup_frames < 60 {
                             // Continue waiting
                         } else {
-                            println!("Texture loaded after {} frames, starting capture...", state.startup_frames);
+                            println!(
+                                "Texture loaded after {} frames, starting capture...",
+                                state.startup_frames
+                            );
                             state.step = CaptureStep::SetupView;
                         }
                     }
@@ -260,7 +270,10 @@ fn capture_sequence(
                     _ => {
                         // Still loading, continue waiting (max 300 frames = 5 sec)
                         if state.startup_frames >= 300 {
-                            println!("WARNING: Asset loading timeout, proceeding anyway. State: {:?}", load_state);
+                            println!(
+                                "WARNING: Asset loading timeout, proceeding anyway. State: {:?}",
+                                load_state
+                            );
                             state.step = CaptureStep::SetupView;
                         }
                     }
@@ -291,14 +304,17 @@ fn capture_sequence(
         }
         CaptureStep::WaitSettle => {
             state.frame_counter += 1;
-            if state.frame_counter > 10 { // Wait 10 frames for things to settle
+            if state.frame_counter > 10 {
+                // Wait 10 frames for things to settle
                 state.step = CaptureStep::Capture;
             }
         }
         CaptureStep::Capture => {
             let path = format!("capture_{}.png", state.view_index);
             if let Ok(window_entity) = main_window.get_single() {
-                screenshot_manager.save_screenshot_to_disk(window_entity, &path).unwrap();
+                screenshot_manager
+                    .save_screenshot_to_disk(window_entity, &path)
+                    .unwrap();
                 println!("Requested screenshot save to {}", path);
                 state.frame_counter = 0;
                 state.step = CaptureStep::WaitSave;
@@ -306,7 +322,8 @@ fn capture_sequence(
         }
         CaptureStep::WaitSave => {
             state.frame_counter += 1;
-            if state.frame_counter > 30 { // Wait 30 frames for save to complete
+            if state.frame_counter > 30 {
+                // Wait 30 frames for save to complete
                 state.view_index += 1;
                 state.step = CaptureStep::SetupView;
             }
@@ -331,11 +348,7 @@ mod tests {
         let config = ViewpointConfig::default();
 
         // Group viewpoints by pitch angle
-        let mut elevations: Vec<f32> = viewpoints
-            .0
-            .iter()
-            .map(|t| t.translation.y)
-            .collect();
+        let mut elevations: Vec<f32> = viewpoints.0.iter().map(|t| t.translation.y).collect();
 
         // Remove near-duplicates and sort
         elevations.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -423,18 +436,26 @@ mod tests {
         // At pitch=0, y=0 and positions should be on XZ plane
         // Expected positions at yaw = 0°, 90°, 180°, 270°
         let expected_positions = [
-            (0.0, 0.0, 1.0),   // yaw=0° → z=1, x=0
-            (1.0, 0.0, 0.0),   // yaw=90° → x=1, z=0
-            (0.0, 0.0, -1.0),  // yaw=180° → z=-1, x=0
-            (-1.0, 0.0, 0.0),  // yaw=270° → x=-1, z=0
+            (0.0, 0.0, 1.0),  // yaw=0° → z=1, x=0
+            (1.0, 0.0, 0.0),  // yaw=90° → x=1, z=0
+            (0.0, 0.0, -1.0), // yaw=180° → z=-1, x=0
+            (-1.0, 0.0, 0.0), // yaw=270° → x=-1, z=0
         ];
 
         for (i, (ex, ey, ez)) in expected_positions.iter().enumerate() {
             let pos = viewpoints.0[i].translation;
             assert!(
-                (pos.x - ex).abs() < 0.001 && (pos.y - ey).abs() < 0.001 && (pos.z - ez).abs() < 0.001,
+                (pos.x - ex).abs() < 0.001
+                    && (pos.y - ey).abs() < 0.001
+                    && (pos.z - ez).abs() < 0.001,
                 "Viewpoint {} at wrong position: ({}, {}, {}) expected ({}, {}, {})",
-                i, pos.x, pos.y, pos.z, ex, ey, ez
+                i,
+                pos.x,
+                pos.y,
+                pos.z,
+                ex,
+                ey,
+                ez
             );
         }
     }
