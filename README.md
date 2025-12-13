@@ -15,14 +15,44 @@ A Bevy application that captures multi-view images of 3D OBJ models for sensor s
 
 ## Setup
 
-1. Place your OBJ model and textures in the `assets/` directory
-2. Update the model path in `src/main.rs` if needed
+### Getting YCB Models
+
+The easiest way to get YCB dataset models is using [ycbust](https://crates.io/crates/ycbust):
+
+```bash
+cargo install ycbust
+ycbust --output-dir /tmp/ycb --subset representative
+```
+
+This downloads the models to `/tmp/ycb`, which the `assets/ycb` symlink points to.
+
+### Custom Models
+
+Alternatively, place your own OBJ model and textures in the `assets/` directory and update the model path in `src/main.rs`.
+
+### System Dependencies (Linux)
+
+```bash
+apt-get install libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+```
 
 ## Usage
 
 ```bash
-cargo run
+cargo run --release
 ```
+
+### Headless/CI Environments
+
+For servers without a GPU, use software rendering:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
+  xvfb-run -a -s "-screen 0 1280x1024x24" \
+  ./target/release/bevy-sensor
+```
+
+Requires: `apt-get install xvfb mesa-utils libgl1-mesa-dri`
 
 The application will:
 1. Load the specified 3D model
