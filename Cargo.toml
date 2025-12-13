@@ -2,6 +2,14 @@
 name = "bevy-sensor"
 version = "0.1.0"
 edition = "2021"
+description = "Bevy library for capturing multi-view images of 3D OBJ models (YCB dataset) for sensor simulation"
+license = "MIT"
+repository = "https://github.com/killerapp/bevy-sensor"
+homepage = "https://github.com/killerapp/bevy-sensor"
+readme = "README.md"
+keywords = ["bevy", "sensor", "3d", "ycb", "simulation"]
+categories = ["game-development", "rendering", "simulation"]
+exclude = [".github", "target", "captures", "assets"]
 
 [dependencies]
 # Disable default features to avoid system dependencies (alsa, libudev)
