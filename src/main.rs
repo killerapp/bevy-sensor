@@ -97,6 +97,7 @@ struct TextureHandle(Handle<Image>);
 struct TexturedMaterial(Handle<StandardMaterial>);
 
 #[derive(Resource, Default)]
+#[allow(dead_code)]
 struct MaterialsReplaced(bool);
 
 #[derive(Default)]
@@ -113,7 +114,7 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    _meshes: ResMut<Assets<Mesh>>,
 ) {
     // Camera - spawned with initial transform, will be moved by system
     // Disable tonemapping for software rendering compatibility
@@ -169,8 +170,9 @@ fn setup(
 }
 
 /// Replace all materials in the scene with our manually-loaded textured material
+#[allow(clippy::too_many_arguments, clippy::manual_is_multiple_of)]
 fn replace_materials(
-    mut replaced: ResMut<MaterialsReplaced>,
+    _replaced: ResMut<MaterialsReplaced>,
     textured_mat: Option<Res<TexturedMaterial>>,
     texture_handle: Option<Res<TextureHandle>>,
     asset_server: Res<AssetServer>,
