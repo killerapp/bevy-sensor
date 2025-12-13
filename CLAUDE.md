@@ -10,7 +10,7 @@ A Bevy library and CLI that captures multi-view images of 3D OBJ models (YCB dat
 # Build
 cargo build --release
 
-# Run tests (26 tests)
+# Run tests (38 tests)
 cargo test
 
 # Run (requires GPU or proper software rendering)
@@ -30,6 +30,15 @@ The library exports these types for use by neocortx:
 
 ```rust
 use bevy_sensor::{
+    // Headless Rendering API (NEW)
+    RenderConfig,        // Render settings (resolution, lighting, depth)
+    RenderOutput,        // RGBA + depth buffer output
+    LightingConfig,      // Configurable lighting
+    CameraIntrinsics,    // Camera parameters for 3D projection
+    render_to_buffer,    // Render single viewpoint to memory
+    render_all_viewpoints, // Batch render all viewpoints
+
+    // File-based Capture (Legacy)
     SensorConfig,        // Full capture configuration
     ViewpointConfig,     // Camera viewpoint settings
     ObjectRotation,      // Object rotation (Euler angles)
@@ -49,6 +58,68 @@ use bevy_sensor::ycb::{
     TEN_OBJECTS,
 };
 ```
+
+### Headless Rendering API (NEW)
+
+Render directly to memory for neocortx integration:
+
+```rust
+use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation};
+use std::path::Path;
+
+// TBP-compatible 64x64 sensor
+let config = RenderConfig::tbp_default();
+let viewpoints = bevy_sensor::generate_viewpoints(&ViewpointConfig::default());
+
+// Render single viewpoint
+let output = render_to_buffer(
+    Path::new("/tmp/ycb/003_cracker_box"),
+    &viewpoints[0],
+    &ObjectRotation::identity(),
+    &config,
+)?;
+
+// Access rendered data
+let rgba: &[u8] = &output.rgba;           // 64*64*4 bytes
+let depth: &[f32] = &output.depth;        // 64*64 floats (meters)
+let rgb_image = output.to_rgb_image();    // Vec<Vec<[u8; 3]>> for neocortx
+let depth_image = output.to_depth_image(); // Vec<Vec<f32>> for neocortx
+```
+
+**RenderConfig options:**
+
+| Constructor | Resolution | Use case |
+|-------------|-----------|----------|
+| `RenderConfig::tbp_default()` | 64×64 | TBP-compatible sensor |
+| `RenderConfig::preview()` | 256×256 | Debugging/visualization |
+| `RenderConfig::high_res()` | 512×512 | Detailed captures |
+
+**LightingConfig options:**
+
+| Constructor | Description |
+|-------------|-------------|
+| `LightingConfig::default()` | Standard 3-point lighting |
+| `LightingConfig::bright()` | High visibility |
+| `LightingConfig::soft()` | Soft, even lighting |
+| `LightingConfig::unlit()` | Ambient only, no shadows |
+
+**CameraIntrinsics:**
+
+```rust
+let intrinsics = config.intrinsics();
+// intrinsics.focal_length: [f32; 2]     - (fx, fy) in pixels
+// intrinsics.principal_point: [f32; 2]  - (cx, cy) center
+// intrinsics.image_size: [u32; 2]       - (width, height)
+
+// Project 3D to 2D
+let pixel = intrinsics.project(point_3d);  // Option<[f32; 2]>
+
+// Unproject 2D + depth to 3D
+let point = intrinsics.unproject([32.0, 32.0], depth);  // Vec3
+```
+
+> **Note:** Current implementation returns placeholder data. Full GPU rendering
+> requires a display (X11/Wayland). Use Xvfb for headless servers.
 
 ### Object Rotation (`ObjectRotation`)
 

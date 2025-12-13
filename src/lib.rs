@@ -360,6 +360,78 @@ pub struct RenderConfig {
     pub near_plane: f32,
     /// Far clipping plane in meters (default: 10.0)
     pub far_plane: f32,
+    /// Lighting configuration
+    pub lighting: LightingConfig,
+}
+
+/// Lighting configuration for rendering.
+///
+/// Controls ambient light and point lights in the scene.
+#[derive(Clone, Debug)]
+pub struct LightingConfig {
+    /// Ambient light brightness (0.0 - 1.0, default: 0.3)
+    pub ambient_brightness: f32,
+    /// Key light intensity in lumens (default: 1500.0)
+    pub key_light_intensity: f32,
+    /// Key light position [x, y, z] (default: [4.0, 8.0, 4.0])
+    pub key_light_position: [f32; 3],
+    /// Fill light intensity in lumens (default: 500.0)
+    pub fill_light_intensity: f32,
+    /// Fill light position [x, y, z] (default: [-4.0, 2.0, -4.0])
+    pub fill_light_position: [f32; 3],
+    /// Enable shadows (default: false for performance)
+    pub shadows_enabled: bool,
+}
+
+impl Default for LightingConfig {
+    fn default() -> Self {
+        Self {
+            ambient_brightness: 0.3,
+            key_light_intensity: 1500.0,
+            key_light_position: [4.0, 8.0, 4.0],
+            fill_light_intensity: 500.0,
+            fill_light_position: [-4.0, 2.0, -4.0],
+            shadows_enabled: false,
+        }
+    }
+}
+
+impl LightingConfig {
+    /// Bright lighting for clear visibility
+    pub fn bright() -> Self {
+        Self {
+            ambient_brightness: 0.5,
+            key_light_intensity: 2000.0,
+            key_light_position: [4.0, 8.0, 4.0],
+            fill_light_intensity: 800.0,
+            fill_light_position: [-4.0, 2.0, -4.0],
+            shadows_enabled: false,
+        }
+    }
+
+    /// Soft lighting with minimal shadows
+    pub fn soft() -> Self {
+        Self {
+            ambient_brightness: 0.4,
+            key_light_intensity: 1000.0,
+            key_light_position: [3.0, 6.0, 3.0],
+            fill_light_intensity: 600.0,
+            fill_light_position: [-3.0, 3.0, -3.0],
+            shadows_enabled: false,
+        }
+    }
+
+    /// Unlit mode - ambient only, no point lights
+    pub fn unlit() -> Self {
+        Self {
+            ambient_brightness: 1.0,
+            key_light_intensity: 0.0,
+            key_light_position: [0.0, 0.0, 0.0],
+            fill_light_intensity: 0.0,
+            fill_light_position: [0.0, 0.0, 0.0],
+            shadows_enabled: false,
+        }
+    }
 }
 
 impl Default for RenderConfig {
@@ -379,6 +451,7 @@ impl RenderConfig {
             zoom: 1.0,
             near_plane: 0.01,
             far_plane: 10.0,
+            lighting: LightingConfig::default(),
         }
     }
 
@@ -390,6 +463,7 @@ impl RenderConfig {
             zoom: 1.0,
             near_plane: 0.01,
             far_plane: 10.0,
+            lighting: LightingConfig::default(),
         }
     }
 
@@ -401,6 +475,7 @@ impl RenderConfig {
             zoom: 1.0,
             near_plane: 0.01,
             far_plane: 10.0,
+            lighting: LightingConfig::default(),
         }
     }
 
