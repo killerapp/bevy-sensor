@@ -1,73 +1,119 @@
 # bevy-sensor
 
-A Bevy application that captures multi-view images of 3D OBJ models for sensor simulation and dataset generation.
+A Bevy library and CLI for capturing multi-view images of 3D OBJ models, designed for [Thousand Brains Project](https://github.com/thousandbrainsproject/tbp.monty) compatible sensor simulation.
 
 ## Features
 
-- Loads OBJ models with textures
-- Automatically captures screenshots from multiple viewpoints around the model
-- Configurable camera positions arranged in a circle
+- Multi-viewpoint capture using spherical coordinates
+- Object rotation support matching TBP benchmark formats
+- Library API for integration with neocortx
+- Programmatic YCB model downloads via ycbust
+- Pre-configured TBP benchmark and training configurations
 
 ## Requirements
 
 - Rust 1.70+
 - Bevy 0.11
+- GPU (software rendering has limitations)
 
 ## Setup
 
 ### Getting YCB Models
 
-The easiest way to get YCB dataset models is using [ycbust](https://crates.io/crates/ycbust):
+**Programmatically (recommended):**
 
-```bash
-cargo install ycbust
-ycbust --output-dir /tmp/ycb --subset representative
+```rust
+use bevy_sensor::ycb::{download_models, Subset};
+
+// Download representative subset (3 objects)
+download_models("/tmp/ycb", Subset::Representative).await?;
+
+// Or download 10 objects for TBP benchmark testing
+download_models("/tmp/ycb", Subset::Ten).await?;
 ```
 
-This downloads the models to `/tmp/ycb`, which the `assets/ycb` symlink points to.
-
-### Custom Models
-
-Alternatively, place your own OBJ model and textures in the `assets/` directory and update the model path in `src/main.rs`.
-
-### System Dependencies (Linux)
-
-```bash
-apt-get install libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-```
+The `assets/ycb` symlink points to `/tmp/ycb`.
 
 ## Usage
+
+### CLI
 
 ```bash
 cargo run --release
 ```
 
-### Headless/CI Environments
+Default configuration captures 72 images (3 rotations × 24 viewpoints) matching TBP benchmark format.
 
-For servers without a GPU, use software rendering:
+### Library
+
+```rust
+use bevy_sensor::{SensorConfig, ObjectRotation, ViewpointConfig};
+
+// TBP benchmark: 3 rotations × 24 viewpoints = 72 captures
+let config = SensorConfig::tbp_benchmark();
+
+// Full training: 14 rotations × 24 viewpoints = 336 captures
+let config = SensorConfig::tbp_full_training();
+
+// Custom configuration
+let config = SensorConfig {
+    viewpoints: ViewpointConfig {
+        radius: 0.5,
+        yaw_count: 8,
+        pitch_angles_deg: vec![-30.0, 0.0, 30.0],
+    },
+    object_rotations: ObjectRotation::tbp_benchmark_rotations(),
+    output_dir: "./captures".to_string(),
+    filename_pattern: "capture_{rot}_{view}.png".to_string(),
+};
+```
+
+### YCB Utilities
+
+```rust
+use bevy_sensor::ycb::{models_exist, object_mesh_path, object_texture_path, REPRESENTATIVE_OBJECTS};
+
+// Check if models are downloaded
+if !models_exist("/tmp/ycb") {
+    download_models("/tmp/ycb", Subset::Representative).await?;
+}
+
+// Get paths to object files
+let mesh = object_mesh_path("/tmp/ycb", "003_cracker_box");
+let texture = object_texture_path("/tmp/ycb", "003_cracker_box");
+
+// List available objects
+for obj in REPRESENTATIVE_OBJECTS {
+    println!("{}", obj);
+}
+```
+
+## TBP Alignment
+
+| TBP Benchmark | bevy-sensor |
+|---------------|-------------|
+| 3 known rotations `[0,0,0], [0,90,0], [0,180,0]` | `ObjectRotation::tbp_benchmark_rotations()` |
+| 14 known orientations (faces + corners) | `ObjectRotation::tbp_known_orientations()` |
+| Distant agent look up/down | Pitch angles: -30°, 0°, +30° |
+| Turn left/right | 8 yaw positions @ 45° intervals |
+
+## Headless Rendering
 
 ```bash
 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
   xvfb-run -a -s "-screen 0 1280x1024x24" \
-  ./target/release/bevy-sensor
+  cargo run --release
 ```
 
-Requires: `apt-get install xvfb mesa-utils libgl1-mesa-dri`
+Note: PBR shaders may fail with software rendering. Real GPU recommended.
 
-The application will:
-1. Load the specified 3D model
-2. Cycle through 24 camera viewpoints (8 yaw × 3 pitch angles)
-3. Save screenshots as `capture_0.png` through `capture_23.png`
-4. Exit automatically after capturing all views
+## Output
 
-## Configuration
-
-Edit `src/main.rs` `ViewpointConfig` to customize:
-- `radius`: Camera distance from the model center (default: 0.5m)
-- `yaw_count`: Number of horizontal positions (default: 8)
-- `pitch_angles_deg`: Elevation angles in degrees (default: [-30°, 0°, +30°])
-
-The viewpoint system uses spherical coordinates matching the [Thousand Brains Project](https://github.com/thousandbrainsproject/tbp.monty) habitat sensor conventions.
+Files are saved as `capture_{rotation}_{viewpoint}.png`:
+- Rotation 0: identity `[0,0,0]`
+- Rotation 1: 90° yaw `[0,90,0]`
+- Rotation 2: 180° yaw `[0,180,0]`
+- Viewpoints 0-23: spherical positions around object
 
 ## License
 
