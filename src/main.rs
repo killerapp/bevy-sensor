@@ -1,6 +1,8 @@
 use bevy::prelude::*;
+use bevy::asset::LoadState;
 use bevy::render::view::screenshot::ScreenshotManager;
 use bevy::window::PrimaryWindow;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy_obj::ObjPlugin;
 use std::f32::consts::PI;
 
@@ -11,7 +13,7 @@ fn main() {
         .init_resource::<CaptureState>()
         .insert_resource(generate_viewpoints())
         .add_systems(Startup, setup)
-        .add_systems(Update, capture_sequence)
+        .add_systems(Update, (replace_materials, capture_sequence).chain())
         .run();
 }
 
@@ -85,11 +87,22 @@ struct CaptureState {
     view_index: usize,
     frame_counter: u32,
     step: CaptureStep,
+    startup_frames: u32,  // Wait for assets to load
 }
+
+#[derive(Resource)]
+struct TextureHandle(Handle<Image>);
+
+#[derive(Resource)]
+struct TexturedMaterial(Handle<StandardMaterial>);
+
+#[derive(Resource, Default)]
+struct MaterialsReplaced(bool);
 
 #[derive(Default)]
 enum CaptureStep {
     #[default]
+    WaitForAssets,  // Initial state - wait for textures to load
     SetupView,
     WaitSettle,
     Capture,
@@ -100,12 +113,17 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     // Camera - spawned with initial transform, will be moved by system
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+    // Disable tonemapping for software rendering compatibility
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
+            tonemapping: Tonemapping::None,
+            ..default()
+        },
+    ));
 
     // Light
     commands.spawn(PointLightBundle {
@@ -117,29 +135,88 @@ fn setup(
         transform: Transform::from_xyz(4.0, 8.0, 4.0),
         ..default()
     });
-    
+
     // Ambient light
     commands.insert_resource(AmbientLight {
         color: Color::WHITE,
         brightness: 0.5,
     });
 
-    // Model
-    let mesh_handle = asset_server.load("ycb/003_cracker_box/google_16k/textured.obj");
-    let texture_handle = asset_server.load("ycb/003_cracker_box/google_16k/texture_map.png");
+    // Load scene (for geometry) and texture separately
+    let scene_handle: Handle<Scene> = asset_server.load("ycb/003_cracker_box/google_16k/textured.obj");
+    let texture_handle: Handle<Image> = asset_server.load("ycb/003_cracker_box/google_16k/texture_map.png");
 
-    let material_handle = materials.add(StandardMaterial {
-        base_color_texture: Some(texture_handle),
-        unlit: false,
+    println!("Loading scene from: ycb/003_cracker_box/google_16k/textured.obj");
+    println!("Loading texture from: ycb/003_cracker_box/google_16k/texture_map.png");
+
+    // Create unlit material with the texture
+    let textured_material = materials.add(StandardMaterial {
+        base_color_texture: Some(texture_handle.clone()),
+        unlit: true,  // Unlit so texture colors are accurate
         ..default()
     });
 
-    commands.spawn(PbrBundle {
-        mesh: mesh_handle,
-        material: material_handle,
-        transform: Transform::from_scale(Vec3::splat(1.0)), 
+    // Store handles for later use
+    commands.insert_resource(TextureHandle(texture_handle));
+    commands.insert_resource(TexturedMaterial(textured_material));
+    commands.insert_resource(MaterialsReplaced::default());
+
+    commands.spawn(SceneBundle {
+        scene: scene_handle,
+        transform: Transform::from_scale(Vec3::splat(1.0)),
         ..default()
     });
+}
+
+/// Replace all materials in the scene with our manually-loaded textured material
+fn replace_materials(
+    mut replaced: ResMut<MaterialsReplaced>,
+    textured_mat: Option<Res<TexturedMaterial>>,
+    texture_handle: Option<Res<TextureHandle>>,
+    asset_server: Res<AssetServer>,
+    mut mesh_query: Query<(Entity, &mut Handle<StandardMaterial>), With<Handle<Mesh>>>,
+    all_entities: Query<Entity>,
+    mesh_entities: Query<Entity, With<Handle<Mesh>>>,
+    state: Res<CaptureState>,
+) {
+    // Wait for texture to be loaded
+    let Some(tex_handle) = texture_handle else { return };
+    let load_state = asset_server.get_load_state(&tex_handle.0);
+    if load_state != LoadState::Loaded {
+        return;
+    }
+
+    let Some(mat) = textured_mat else { return };
+
+    // Keep replacing materials every frame until capture starts
+    // This ensures we catch scene entities as they spawn
+    if !matches!(state.step, CaptureStep::WaitForAssets) {
+        return;
+    }
+
+    // Debug: count entities
+    let total_entities = all_entities.iter().count();
+    let mesh_entity_count = mesh_entities.iter().count();
+    let mat_entity_count = mesh_query.iter().count();
+
+    if state.startup_frames % 30 == 0 {
+        println!("DEBUG: {} total entities, {} with mesh, {} with mesh+material",
+                 total_entities, mesh_entity_count, mat_entity_count);
+    }
+
+    // Replace all materials
+    let mut count = 0;
+    for (entity, mut material_handle) in mesh_query.iter_mut() {
+        if *material_handle != mat.0 {
+            println!("Replacing material on entity {:?}", entity);
+            *material_handle = mat.0.clone();
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        println!("Replaced {} materials with textured material", count);
+    }
 }
 
 fn capture_sequence(
@@ -148,13 +225,57 @@ fn capture_sequence(
     mut camera_query: Query<&mut Transform, With<Camera3d>>,
     main_window: Query<Entity, With<PrimaryWindow>>,
     mut screenshot_manager: ResMut<ScreenshotManager>,
+    asset_server: Res<AssetServer>,
+    texture_handle: Option<Res<TextureHandle>>,
 ) {
     match state.step {
+        CaptureStep::WaitForAssets => {
+            state.startup_frames += 1;
+
+            // Check actual asset load state
+            if let Some(handle) = &texture_handle {
+                let load_state = asset_server.get_load_state(&handle.0);
+                if state.startup_frames % 30 == 0 {
+                    println!("Frame {}: Texture load state: {:?}", state.startup_frames, load_state);
+                }
+
+                match load_state {
+                    LoadState::Loaded => {
+                        let path = asset_server.get_handle_path(&handle.0);
+                        println!("Texture loaded. Path: {:?}", path);
+
+                        // Add extra wait for dependent assets after texture is loaded
+                        // Wait 60 frames for render pipeline to process materials
+                        if state.startup_frames < 60 {
+                            // Continue waiting
+                        } else {
+                            println!("Texture loaded after {} frames, starting capture...", state.startup_frames);
+                            state.step = CaptureStep::SetupView;
+                        }
+                    }
+                    LoadState::Failed => {
+                        println!("ERROR: Texture failed to load!");
+                        std::process::exit(1);
+                    }
+                    _ => {
+                        // Still loading, continue waiting (max 300 frames = 5 sec)
+                        if state.startup_frames >= 300 {
+                            println!("WARNING: Asset loading timeout, proceeding anyway. State: {:?}", load_state);
+                            state.step = CaptureStep::SetupView;
+                        }
+                    }
+                }
+            } else if state.startup_frames >= 120 {
+                println!("Assets loaded (no handle check), starting capture sequence...");
+                state.step = CaptureStep::SetupView;
+            }
+        }
         CaptureStep::SetupView => {
+            // Capture all viewpoints
             if state.view_index >= viewpoints.0.len() {
                 // Wait a bit before exiting to ensure last save
                 state.frame_counter += 1;
-                if state.frame_counter > 200 {
+                if state.frame_counter > 50 {
                     println!("All views captured. Exiting.");
                     std::process::exit(0);
                 }
@@ -185,7 +306,7 @@ fn capture_sequence(
         }
         CaptureStep::WaitSave => {
             state.frame_counter += 1;
-            if state.frame_counter > 200 { // Wait 200 frames for save to complete
+            if state.frame_counter > 30 { // Wait 30 frames for save to complete
                 state.view_index += 1;
                 state.step = CaptureStep::SetupView;
             }

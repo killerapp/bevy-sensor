@@ -169,9 +169,19 @@ ycbust = "0.2.3"
 
 ## Known Limitations
 
-1. **Software rendering (llvmpipe)**: PBR shaders may fail with `gsamplerCubeArrayShadow` error. Requires real GPU for full functionality.
+1. **Software rendering (llvmpipe)**:
+   - **CRITICAL**: Must disable tonemapping (`Tonemapping::None`) on the camera, otherwise all materials render as magenta/pink (the "missing texture" fallback color). This is due to a bug in Bevy's PBR pipeline with llvmpipe.
+   - Run with `WGPU_BACKEND=vulkan DISPLAY=:0` for llvmpipe Vulkan rendering.
+   - PBR shaders may fail with `gsamplerCubeArrayShadow` error in some configurations.
 
-2. **Asset path**: When running binary directly from `target/release/`, assets must be in `target/release/assets/`. Use `cargo run` to run from project root instead.
+2. **Texture loading with bevy_obj**:
+   - The bevy_obj scene loader has "limited MTL support" - textures may not load automatically.
+   - **Workaround**: Load textures manually with `asset_server.load()` and replace materials after scene spawns.
+   - MTL files with trailing spaces in texture paths (e.g., `map_Kd texture_map.png `) may cause texture loading failures.
+
+3. **Asset path**: When running binary directly from `target/release/`, assets must be in `target/release/assets/`. Use `cargo run` to run from project root instead.
+
+4. **WSL2 GPU rendering**: WSL2 supports GPU compute (CUDA) but not windowed Vulkan rendering. Must use llvmpipe software rendering with the fixes above.
 
 ## Viewpoint Coordinate Reference
 
