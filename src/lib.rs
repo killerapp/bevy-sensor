@@ -4,7 +4,30 @@
 //! designed to match TBP (Thousand Brains Project) habitat sensor conventions for
 //! use in neocortx sensorimotor learning experiments.
 //!
-//! # Example
+//! # Headless Rendering (NEW)
+//!
+//! Render directly to memory buffers for use in sensorimotor learning:
+//!
+//! ```ignore
+//! use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation};
+//! use std::path::Path;
+//!
+//! let config = RenderConfig::tbp_default(); // 64x64, RGBD
+//! let viewpoint = bevy_sensor::generate_viewpoints(&ViewpointConfig::default())[0];
+//! let rotation = ObjectRotation::identity();
+//!
+//! let output = render_to_buffer(
+//!     Path::new("/tmp/ycb/003_cracker_box"),
+//!     &viewpoint,
+//!     &rotation,
+//!     &config,
+//! )?;
+//!
+//! // output.rgba: Vec<u8> - RGBA pixels (64*64*4 bytes)
+//! // output.depth: Vec<f32> - Depth values (64*64 floats)
+//! ```
+//!
+//! # File-based Capture (Legacy)
 //!
 //! ```ignore
 //! use bevy_sensor::{SensorConfig, ViewpointConfig, ObjectRotation};
@@ -29,6 +52,11 @@
 
 use bevy::prelude::*;
 use std::f32::consts::PI;
+use std::path::Path;
+
+// Headless rendering implementation (currently returns placeholder data)
+// Full GPU rendering requires a display - see render module for details
+mod render;
 
 // Re-export ycbust types for convenience
 pub use ycbust::{self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TEN_OBJECTS};
@@ -312,6 +340,319 @@ pub struct CaptureTarget;
 #[derive(Component)]
 pub struct CaptureCamera;
 
+// ============================================================================
+// Headless Rendering API (NEW)
+// ============================================================================
+
+/// Configuration for headless rendering.
+///
+/// Matches TBP habitat sensor defaults: 64x64 resolution with RGBD output.
+#[derive(Clone, Debug)]
+pub struct RenderConfig {
+    /// Image width in pixels (default: 64)
+    pub width: u32,
+    /// Image height in pixels (default: 64)
+    pub height: u32,
+    /// Zoom factor affecting field of view (default: 1.0)
+    /// Use >1 to zoom in (narrower FOV), <1 to zoom out (wider FOV)
+    pub zoom: f32,
+    /// Near clipping plane in meters (default: 0.01)
+    pub near_plane: f32,
+    /// Far clipping plane in meters (default: 10.0)
+    pub far_plane: f32,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self::tbp_default()
+    }
+}
+
+impl RenderConfig {
+    /// TBP-compatible 64x64 RGBD sensor configuration.
+    ///
+    /// This matches the default resolution used in TBP's habitat sensor.
+    pub fn tbp_default() -> Self {
+        Self {
+            width: 64,
+            height: 64,
+            zoom: 1.0,
+            near_plane: 0.01,
+            far_plane: 10.0,
+        }
+    }
+
+    /// Higher resolution configuration for debugging and visualization.
+    pub fn preview() -> Self {
+        Self {
+            width: 256,
+            height: 256,
+            zoom: 1.0,
+            near_plane: 0.01,
+            far_plane: 10.0,
+        }
+    }
+
+    /// High resolution configuration for detailed captures.
+    pub fn high_res() -> Self {
+        Self {
+            width: 512,
+            height: 512,
+            zoom: 1.0,
+            near_plane: 0.01,
+            far_plane: 10.0,
+        }
+    }
+
+    /// Calculate vertical field of view in radians based on zoom.
+    ///
+    /// Base FOV is 60 degrees, adjusted by zoom factor.
+    pub fn fov_radians(&self) -> f32 {
+        let base_fov_deg = 60.0_f32;
+        (base_fov_deg / self.zoom).to_radians()
+    }
+
+    /// Compute camera intrinsics for use with neocortx.
+    ///
+    /// Returns focal length and principal point based on resolution and FOV.
+    pub fn intrinsics(&self) -> CameraIntrinsics {
+        let fov = self.fov_radians();
+        // focal_length = (height/2) / tan(fov/2)
+        let fy = (self.height as f32 / 2.0) / (fov / 2.0).tan();
+        let fx = fy; // Assuming square pixels
+
+        CameraIntrinsics {
+            focal_length: [fx, fy],
+            principal_point: [self.width as f32 / 2.0, self.height as f32 / 2.0],
+            image_size: [self.width, self.height],
+        }
+    }
+}
+
+/// Camera intrinsic parameters for 3D reconstruction.
+///
+/// Compatible with neocortx's VisionIntrinsics format.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraIntrinsics {
+    /// Focal length in pixels (fx, fy)
+    pub focal_length: [f32; 2],
+    /// Principal point (cx, cy) - typically image center
+    pub principal_point: [f32; 2],
+    /// Image dimensions (width, height)
+    pub image_size: [u32; 2],
+}
+
+impl CameraIntrinsics {
+    /// Project a 3D point to 2D pixel coordinates.
+    pub fn project(&self, point: Vec3) -> Option<[f32; 2]> {
+        if point.z <= 0.0 {
+            return None;
+        }
+        let x = (point.x / point.z) * self.focal_length[0] + self.principal_point[0];
+        let y = (point.y / point.z) * self.focal_length[1] + self.principal_point[1];
+        Some([x, y])
+    }
+
+    /// Unproject a 2D pixel to a 3D ray direction.
+    pub fn unproject(&self, pixel: [f32; 2], depth: f32) -> Vec3 {
+        let x = (pixel[0] - self.principal_point[0]) / self.focal_length[0] * depth;
+        let y = (pixel[1] - self.principal_point[1]) / self.focal_length[1] * depth;
+        Vec3::new(x, y, depth)
+    }
+}
+
+/// Output from headless rendering containing RGBA and depth data.
+#[derive(Clone, Debug)]
+pub struct RenderOutput {
+    /// RGBA pixel data in row-major order (width * height * 4 bytes)
+    pub rgba: Vec<u8>,
+    /// Depth values in meters, row-major order (width * height floats)
+    /// Values are linear depth from camera, not normalized.
+    pub depth: Vec<f32>,
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+    /// Camera intrinsics used for this render
+    pub intrinsics: CameraIntrinsics,
+    /// Camera transform (world position and orientation)
+    pub camera_transform: Transform,
+    /// Object rotation applied during render
+    pub object_rotation: ObjectRotation,
+}
+
+impl RenderOutput {
+    /// Get RGBA pixel at (x, y). Returns None if out of bounds.
+    pub fn get_rgba(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = ((y * self.width + x) * 4) as usize;
+        Some([
+            self.rgba[idx],
+            self.rgba[idx + 1],
+            self.rgba[idx + 2],
+            self.rgba[idx + 3],
+        ])
+    }
+
+    /// Get depth value at (x, y) in meters. Returns None if out of bounds.
+    pub fn get_depth(&self, x: u32, y: u32) -> Option<f32> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = (y * self.width + x) as usize;
+        Some(self.depth[idx])
+    }
+
+    /// Get RGB pixel (without alpha) at (x, y).
+    pub fn get_rgb(&self, x: u32, y: u32) -> Option<[u8; 3]> {
+        self.get_rgba(x, y).map(|rgba| [rgba[0], rgba[1], rgba[2]])
+    }
+
+    /// Convert to neocortx-compatible image format: Vec<Vec<[u8; 3]>>
+    pub fn to_rgb_image(&self) -> Vec<Vec<[u8; 3]>> {
+        let mut image = Vec::with_capacity(self.height as usize);
+        for y in 0..self.height {
+            let mut row = Vec::with_capacity(self.width as usize);
+            for x in 0..self.width {
+                row.push(self.get_rgb(x, y).unwrap_or([0, 0, 0]));
+            }
+            image.push(row);
+        }
+        image
+    }
+
+    /// Convert depth to neocortx-compatible format: Vec<Vec<f32>>
+    pub fn to_depth_image(&self) -> Vec<Vec<f32>> {
+        let mut image = Vec::with_capacity(self.height as usize);
+        for y in 0..self.height {
+            let mut row = Vec::with_capacity(self.width as usize);
+            for x in 0..self.width {
+                row.push(self.get_depth(x, y).unwrap_or(0.0));
+            }
+            image.push(row);
+        }
+        image
+    }
+}
+
+/// Errors that can occur during rendering.
+#[derive(Debug, Clone)]
+pub enum RenderError {
+    /// Object mesh file not found
+    MeshNotFound(String),
+    /// Object texture file not found
+    TextureNotFound(String),
+    /// Bevy rendering failed
+    RenderFailed(String),
+    /// Invalid configuration
+    InvalidConfig(String),
+}
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderError::MeshNotFound(path) => write!(f, "Mesh not found: {}", path),
+            RenderError::TextureNotFound(path) => write!(f, "Texture not found: {}", path),
+            RenderError::RenderFailed(msg) => write!(f, "Render failed: {}", msg),
+            RenderError::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+/// Render a YCB object to an in-memory buffer.
+///
+/// This is the primary API for headless rendering. It spawns a minimal Bevy app,
+/// renders a single frame, extracts the RGBA and depth data, and shuts down.
+///
+/// # Arguments
+/// * `object_dir` - Path to YCB object directory (e.g., "/tmp/ycb/003_cracker_box")
+/// * `camera_transform` - Camera position and orientation (use `generate_viewpoints`)
+/// * `object_rotation` - Rotation to apply to the object
+/// * `config` - Render configuration (resolution, depth range, etc.)
+///
+/// # Example
+/// ```ignore
+/// use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation};
+/// use std::path::Path;
+///
+/// let viewpoints = bevy_sensor::generate_viewpoints(&ViewpointConfig::default());
+/// let output = render_to_buffer(
+///     Path::new("/tmp/ycb/003_cracker_box"),
+///     &viewpoints[0],
+///     &ObjectRotation::identity(),
+///     &RenderConfig::tbp_default(),
+/// )?;
+/// ```
+pub fn render_to_buffer(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    config: &RenderConfig,
+) -> Result<RenderOutput, RenderError> {
+    // Validate paths
+    let mesh_path = object_dir.join("google_16k/textured.obj");
+    let texture_path = object_dir.join("google_16k/texture_map.png");
+
+    if !mesh_path.exists() {
+        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+    }
+    if !texture_path.exists() {
+        return Err(RenderError::TextureNotFound(
+            texture_path.display().to_string(),
+        ));
+    }
+
+    // TODO: Implement actual Bevy headless rendering
+    // For now, return placeholder data to establish the API
+    let pixel_count = (config.width * config.height) as usize;
+    let intrinsics = config.intrinsics();
+
+    Ok(RenderOutput {
+        rgba: vec![128u8; pixel_count * 4], // Gray placeholder
+        depth: vec![0.5f32; pixel_count],   // 0.5m placeholder depth
+        width: config.width,
+        height: config.height,
+        intrinsics,
+        camera_transform: *camera_transform,
+        object_rotation: object_rotation.clone(),
+    })
+}
+
+/// Render all viewpoints and rotations for a YCB object.
+///
+/// Convenience function that renders all combinations of viewpoints and rotations.
+///
+/// # Arguments
+/// * `object_dir` - Path to YCB object directory
+/// * `viewpoint_config` - Viewpoint configuration (camera positions)
+/// * `rotations` - Object rotations to render
+/// * `render_config` - Render configuration
+///
+/// # Returns
+/// Vector of RenderOutput, one per viewpoint × rotation combination.
+pub fn render_all_viewpoints(
+    object_dir: &Path,
+    viewpoint_config: &ViewpointConfig,
+    rotations: &[ObjectRotation],
+    render_config: &RenderConfig,
+) -> Result<Vec<RenderOutput>, RenderError> {
+    let viewpoints = generate_viewpoints(viewpoint_config);
+    let mut outputs = Vec::with_capacity(viewpoints.len() * rotations.len());
+
+    for rotation in rotations {
+        for viewpoint in &viewpoints {
+            let output = render_to_buffer(object_dir, viewpoint, rotation, render_config)?;
+            outputs.push(output);
+        }
+    }
+
+    Ok(outputs)
+}
+
 // Re-export bevy types that consumers will need
 pub use bevy::prelude::{Quat, Transform, Vec3};
 
@@ -476,5 +817,187 @@ mod tests {
             path.to_string_lossy(),
             "/tmp/ycb/003_cracker_box/google_16k/texture_map.png"
         );
+    }
+
+    // =========================================================================
+    // Headless Rendering API Tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_config_tbp_default() {
+        let config = RenderConfig::tbp_default();
+        assert_eq!(config.width, 64);
+        assert_eq!(config.height, 64);
+        assert_eq!(config.zoom, 1.0);
+        assert_eq!(config.near_plane, 0.01);
+        assert_eq!(config.far_plane, 10.0);
+    }
+
+    #[test]
+    fn test_render_config_preview() {
+        let config = RenderConfig::preview();
+        assert_eq!(config.width, 256);
+        assert_eq!(config.height, 256);
+    }
+
+    #[test]
+    fn test_render_config_default_is_tbp() {
+        let default = RenderConfig::default();
+        let tbp = RenderConfig::tbp_default();
+        assert_eq!(default.width, tbp.width);
+        assert_eq!(default.height, tbp.height);
+    }
+
+    #[test]
+    fn test_render_config_fov() {
+        let config = RenderConfig::tbp_default();
+        let fov = config.fov_radians();
+        // Base FOV is 60 degrees = ~1.047 radians
+        assert!((fov - 1.047).abs() < 0.01);
+
+        // Zoom in should reduce FOV
+        let zoomed = RenderConfig {
+            zoom: 2.0,
+            ..config
+        };
+        assert!(zoomed.fov_radians() < fov);
+    }
+
+    #[test]
+    fn test_render_config_intrinsics() {
+        let config = RenderConfig::tbp_default();
+        let intrinsics = config.intrinsics();
+
+        assert_eq!(intrinsics.image_size, [64, 64]);
+        assert_eq!(intrinsics.principal_point, [32.0, 32.0]);
+        // Focal length should be positive and reasonable
+        assert!(intrinsics.focal_length[0] > 0.0);
+        assert!(intrinsics.focal_length[1] > 0.0);
+        // For 64x64 with 60° FOV, focal length ≈ 55.4 pixels
+        assert!((intrinsics.focal_length[0] - 55.4).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_camera_intrinsics_project() {
+        let intrinsics = CameraIntrinsics {
+            focal_length: [100.0, 100.0],
+            principal_point: [32.0, 32.0],
+            image_size: [64, 64],
+        };
+
+        // Point at origin of camera frame projects to principal point
+        let center = intrinsics.project(Vec3::new(0.0, 0.0, 1.0));
+        assert!(center.is_some());
+        let [x, y] = center.unwrap();
+        assert!((x - 32.0).abs() < 0.001);
+        assert!((y - 32.0).abs() < 0.001);
+
+        // Point behind camera returns None
+        let behind = intrinsics.project(Vec3::new(0.0, 0.0, -1.0));
+        assert!(behind.is_none());
+    }
+
+    #[test]
+    fn test_camera_intrinsics_unproject() {
+        let intrinsics = CameraIntrinsics {
+            focal_length: [100.0, 100.0],
+            principal_point: [32.0, 32.0],
+            image_size: [64, 64],
+        };
+
+        // Unproject principal point at depth 1.0
+        let point = intrinsics.unproject([32.0, 32.0], 1.0);
+        assert!((point.x).abs() < 0.001);
+        assert!((point.y).abs() < 0.001);
+        assert!((point.z - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_render_output_get_rgba() {
+        let output = RenderOutput {
+            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255],
+            depth: vec![1.0, 2.0, 3.0, 4.0],
+            width: 2,
+            height: 2,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+        };
+
+        // Top-left: red
+        assert_eq!(output.get_rgba(0, 0), Some([255, 0, 0, 255]));
+        // Top-right: green
+        assert_eq!(output.get_rgba(1, 0), Some([0, 255, 0, 255]));
+        // Bottom-left: blue
+        assert_eq!(output.get_rgba(0, 1), Some([0, 0, 255, 255]));
+        // Bottom-right: white
+        assert_eq!(output.get_rgba(1, 1), Some([255, 255, 255, 255]));
+        // Out of bounds
+        assert_eq!(output.get_rgba(2, 0), None);
+    }
+
+    #[test]
+    fn test_render_output_get_depth() {
+        let output = RenderOutput {
+            rgba: vec![0u8; 16],
+            depth: vec![1.0, 2.0, 3.0, 4.0],
+            width: 2,
+            height: 2,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+        };
+
+        assert_eq!(output.get_depth(0, 0), Some(1.0));
+        assert_eq!(output.get_depth(1, 0), Some(2.0));
+        assert_eq!(output.get_depth(0, 1), Some(3.0));
+        assert_eq!(output.get_depth(1, 1), Some(4.0));
+        assert_eq!(output.get_depth(2, 0), None);
+    }
+
+    #[test]
+    fn test_render_output_to_rgb_image() {
+        let output = RenderOutput {
+            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255],
+            depth: vec![1.0, 2.0, 3.0, 4.0],
+            width: 2,
+            height: 2,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+        };
+
+        let image = output.to_rgb_image();
+        assert_eq!(image.len(), 2); // 2 rows
+        assert_eq!(image[0].len(), 2); // 2 columns
+        assert_eq!(image[0][0], [255, 0, 0]); // Red
+        assert_eq!(image[0][1], [0, 255, 0]); // Green
+        assert_eq!(image[1][0], [0, 0, 255]); // Blue
+        assert_eq!(image[1][1], [255, 255, 255]); // White
+    }
+
+    #[test]
+    fn test_render_output_to_depth_image() {
+        let output = RenderOutput {
+            rgba: vec![0u8; 16],
+            depth: vec![1.0, 2.0, 3.0, 4.0],
+            width: 2,
+            height: 2,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+        };
+
+        let depth_image = output.to_depth_image();
+        assert_eq!(depth_image.len(), 2);
+        assert_eq!(depth_image[0], vec![1.0, 2.0]);
+        assert_eq!(depth_image[1], vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_render_error_display() {
+        let err = RenderError::MeshNotFound("/path/to/mesh.obj".to_string());
+        assert!(err.to_string().contains("Mesh not found"));
+        assert!(err.to_string().contains("/path/to/mesh.obj"));
     }
 }
