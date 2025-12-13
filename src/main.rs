@@ -18,18 +18,64 @@ fn main() {
 #[derive(Resource)]
 struct Viewpoints(Vec<Transform>);
 
-fn generate_viewpoints() -> Viewpoints {
-    let mut views = Vec::new();
-    let radius = 0.5;
-    let height = 0.3;
-    let count = 8;
+/// Configuration for viewpoint generation matching TBP habitat sensor behavior.
+/// Uses spherical coordinates to capture objects from multiple elevations.
+#[derive(Clone)]
+struct ViewpointConfig {
+    /// Distance from camera to object center (meters)
+    radius: f32,
+    /// Number of horizontal positions (yaw angles) around the object
+    yaw_count: usize,
+    /// Elevation angles in degrees (pitch). Positive = above, negative = below.
+    /// TBP distant agent uses up/down/left/right movement for exploration.
+    pitch_angles_deg: Vec<f32>,
+}
 
-    for i in 0..count {
-        let angle = (i as f32) * 2.0 * PI / (count as f32);
-        let x = radius * angle.cos();
-        let z = radius * angle.sin();
-        let transform = Transform::from_xyz(x, height, z).looking_at(Vec3::ZERO, Vec3::Y);
-        views.push(transform);
+impl Default for ViewpointConfig {
+    fn default() -> Self {
+        Self {
+            radius: 0.5,
+            yaw_count: 8,
+            // Three elevations: below (-30°), level (0°), above (+30°)
+            // This matches TBP's look_up/look_down capability
+            pitch_angles_deg: vec![-30.0, 0.0, 30.0],
+        }
+    }
+}
+
+fn generate_viewpoints() -> Viewpoints {
+    generate_viewpoints_with_config(ViewpointConfig::default())
+}
+
+/// Generate camera viewpoints using spherical coordinates.
+///
+/// Spherical coordinate system (matching TBP habitat sensor conventions):
+/// - Yaw: horizontal rotation around Y-axis (0° to 360°)
+/// - Pitch: elevation angle from horizontal plane (-90° to +90°)
+/// - Radius: distance from origin (object center)
+///
+/// This produces viewpoints that cover the object from multiple angles and elevations,
+/// similar to how TBP's distant agent explores objects with look_up/look_down/turn_left/turn_right.
+fn generate_viewpoints_with_config(config: ViewpointConfig) -> Viewpoints {
+    let mut views = Vec::new();
+
+    for pitch_deg in &config.pitch_angles_deg {
+        let pitch = pitch_deg.to_radians();
+
+        for i in 0..config.yaw_count {
+            let yaw = (i as f32) * 2.0 * PI / (config.yaw_count as f32);
+
+            // Spherical to Cartesian conversion (Y-up coordinate system)
+            // x = r * cos(pitch) * sin(yaw)
+            // y = r * sin(pitch)
+            // z = r * cos(pitch) * cos(yaw)
+            let x = config.radius * pitch.cos() * yaw.sin();
+            let y = config.radius * pitch.sin();
+            let z = config.radius * pitch.cos() * yaw.cos();
+
+            let transform = Transform::from_xyz(x, y, z).looking_at(Vec3::ZERO, Vec3::Y);
+            views.push(transform);
+        }
     }
     Viewpoints(views)
 }
@@ -154,35 +200,50 @@ mod tests {
     #[test]
     fn test_generate_viewpoints_count() {
         let viewpoints = generate_viewpoints();
-        assert_eq!(viewpoints.0.len(), 8);
+        // 8 yaw positions × 3 pitch angles = 24 viewpoints
+        assert_eq!(viewpoints.0.len(), 24);
     }
 
     #[test]
-    fn test_viewpoints_all_at_correct_height() {
+    fn test_viewpoints_cover_multiple_elevations() {
         let viewpoints = generate_viewpoints();
-        let expected_height = 0.3;
-        for (i, transform) in viewpoints.0.iter().enumerate() {
-            assert!(
-                (transform.translation.y - expected_height).abs() < 0.001,
-                "Viewpoint {} has incorrect height: {}",
-                i,
-                transform.translation.y
-            );
-        }
+        let config = ViewpointConfig::default();
+
+        // Group viewpoints by pitch angle
+        let mut elevations: Vec<f32> = viewpoints
+            .0
+            .iter()
+            .map(|t| t.translation.y)
+            .collect();
+
+        // Remove near-duplicates and sort
+        elevations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        elevations.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+
+        // Should have 3 distinct elevation levels
+        assert_eq!(
+            elevations.len(),
+            config.pitch_angles_deg.len(),
+            "Expected {} elevation levels, got {}",
+            config.pitch_angles_deg.len(),
+            elevations.len()
+        );
     }
 
     #[test]
-    fn test_viewpoints_at_correct_radius() {
+    fn test_viewpoints_at_correct_spherical_radius() {
         let viewpoints = generate_viewpoints();
-        let expected_radius = 0.5;
+        let config = ViewpointConfig::default();
+
         for (i, transform) in viewpoints.0.iter().enumerate() {
-            let actual_radius =
-                (transform.translation.x.powi(2) + transform.translation.z.powi(2)).sqrt();
+            // Spherical radius: sqrt(x² + y² + z²)
+            let actual_radius = transform.translation.length();
             assert!(
-                (actual_radius - expected_radius).abs() < 0.001,
-                "Viewpoint {} has incorrect radius: {}",
+                (actual_radius - config.radius).abs() < 0.001,
+                "Viewpoint {} has incorrect spherical radius: {} (expected {})",
                 i,
-                actual_radius
+                actual_radius,
+                config.radius
             );
         }
     }
@@ -201,6 +262,73 @@ mod tests {
                 dot
             );
         }
+    }
+
+    #[test]
+    fn test_viewpoints_pitch_angles_correct() {
+        let config = ViewpointConfig::default();
+        let viewpoints = generate_viewpoints_with_config(config.clone());
+
+        for (pitch_idx, pitch_deg) in config.pitch_angles_deg.iter().enumerate() {
+            let pitch_rad = pitch_deg.to_radians();
+            let expected_y = config.radius * pitch_rad.sin();
+
+            for yaw_idx in 0..config.yaw_count {
+                let view_idx = pitch_idx * config.yaw_count + yaw_idx;
+                let actual_y = viewpoints.0[view_idx].translation.y;
+
+                assert!(
+                    (actual_y - expected_y).abs() < 0.001,
+                    "Viewpoint {} (pitch={}, yaw={}) has incorrect Y: {} (expected {})",
+                    view_idx,
+                    pitch_deg,
+                    yaw_idx,
+                    actual_y,
+                    expected_y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_viewpoints_yaw_distribution() {
+        let config = ViewpointConfig {
+            radius: 1.0,
+            yaw_count: 4,
+            pitch_angles_deg: vec![0.0], // Single elevation for simpler testing
+        };
+        let viewpoints = generate_viewpoints_with_config(config);
+
+        // At pitch=0, y=0 and positions should be on XZ plane
+        // Expected positions at yaw = 0°, 90°, 180°, 270°
+        let expected_positions = [
+            (0.0, 0.0, 1.0),   // yaw=0° → z=1, x=0
+            (1.0, 0.0, 0.0),   // yaw=90° → x=1, z=0
+            (0.0, 0.0, -1.0),  // yaw=180° → z=-1, x=0
+            (-1.0, 0.0, 0.0),  // yaw=270° → x=-1, z=0
+        ];
+
+        for (i, (ex, ey, ez)) in expected_positions.iter().enumerate() {
+            let pos = viewpoints.0[i].translation;
+            assert!(
+                (pos.x - ex).abs() < 0.001 && (pos.y - ey).abs() < 0.001 && (pos.z - ez).abs() < 0.001,
+                "Viewpoint {} at wrong position: ({}, {}, {}) expected ({}, {}, {})",
+                i, pos.x, pos.y, pos.z, ex, ey, ez
+            );
+        }
+    }
+
+    #[test]
+    fn test_custom_config() {
+        let config = ViewpointConfig {
+            radius: 1.0,
+            yaw_count: 4,
+            pitch_angles_deg: vec![-45.0, 0.0, 45.0, 90.0],
+        };
+        let viewpoints = generate_viewpoints_with_config(config);
+
+        // 4 yaw × 4 pitch = 16 viewpoints
+        assert_eq!(viewpoints.0.len(), 16);
     }
 
     #[test]
