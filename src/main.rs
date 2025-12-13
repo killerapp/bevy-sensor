@@ -480,6 +480,6 @@ mod tests {
         let state = CaptureState::default();
         assert_eq!(state.view_index, 0);
         assert_eq!(state.frame_counter, 0);
-        assert!(matches!(state.step, CaptureStep::SetupView));
+        assert!(matches!(state.step, CaptureStep::WaitForAssets));
     }
 }
