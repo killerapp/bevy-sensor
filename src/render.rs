@@ -171,33 +171,46 @@ fn setup_scene(
         RenderCamera,
     ));
 
-    // Ambient light
+    // Ambient light (from config)
+    let lighting = &request.config.lighting;
     commands.insert_resource(AmbientLight {
         color: Color::WHITE,
-        brightness: 0.3,
+        brightness: lighting.ambient_brightness,
     });
 
-    // Key light
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            intensity: 1500.0,
-            shadows_enabled: false,
+    // Key light (from config)
+    if lighting.key_light_intensity > 0.0 {
+        commands.spawn(PointLightBundle {
+            point_light: PointLight {
+                intensity: lighting.key_light_intensity,
+                shadows_enabled: lighting.shadows_enabled,
+                ..default()
+            },
+            transform: Transform::from_xyz(
+                lighting.key_light_position[0],
+                lighting.key_light_position[1],
+                lighting.key_light_position[2],
+            ),
             ..default()
-        },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
-        ..default()
-    });
+        });
+    }
 
-    // Fill light
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            intensity: 500.0,
-            shadows_enabled: false,
+    // Fill light (from config)
+    if lighting.fill_light_intensity > 0.0 {
+        commands.spawn(PointLightBundle {
+            point_light: PointLight {
+                intensity: lighting.fill_light_intensity,
+                shadows_enabled: lighting.shadows_enabled,
+                ..default()
+            },
+            transform: Transform::from_xyz(
+                lighting.fill_light_position[0],
+                lighting.fill_light_position[1],
+                lighting.fill_light_position[2],
+            ),
             ..default()
-        },
-        transform: Transform::from_xyz(-4.0, 2.0, -4.0),
-        ..default()
-    });
+        });
+    }
 
     // Load the scene
     let scene_handle: Handle<Scene> = asset_server.load(&request.mesh_path);
