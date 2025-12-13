@@ -79,7 +79,8 @@ pub mod ycb {
     pub fn models_exist<P: AsRef<Path>>(output_dir: P) -> bool {
         let path = output_dir.as_ref();
         // Check for at least one representative object
-        path.join("003_cracker_box/google_16k/textured.obj").exists()
+        path.join("003_cracker_box/google_16k/textured.obj")
+            .exists()
     }
 
     /// Get the path to a specific YCB object's OBJ file
@@ -92,7 +93,10 @@ pub mod ycb {
     }
 
     /// Get the path to a specific YCB object's texture file
-    pub fn object_texture_path<P: AsRef<Path>>(output_dir: P, object_id: &str) -> std::path::PathBuf {
+    pub fn object_texture_path<P: AsRef<Path>>(
+        output_dir: P,
+        object_id: &str,
+    ) -> std::path::PathBuf {
         output_dir
             .as_ref()
             .join(object_id)
@@ -148,12 +152,12 @@ impl ObjectRotation {
     pub fn tbp_known_orientations() -> Vec<Self> {
         vec![
             // 6 cube faces (90° rotations around each axis)
-            Self::from_array([0.0, 0.0, 0.0]),     // Front
-            Self::from_array([0.0, 90.0, 0.0]),    // Right
-            Self::from_array([0.0, 180.0, 0.0]),   // Back
-            Self::from_array([0.0, 270.0, 0.0]),   // Left
-            Self::from_array([90.0, 0.0, 0.0]),    // Top
-            Self::from_array([-90.0, 0.0, 0.0]),   // Bottom
+            Self::from_array([0.0, 0.0, 0.0]),   // Front
+            Self::from_array([0.0, 90.0, 0.0]),  // Right
+            Self::from_array([0.0, 180.0, 0.0]), // Back
+            Self::from_array([0.0, 270.0, 0.0]), // Left
+            Self::from_array([90.0, 0.0, 0.0]),  // Top
+            Self::from_array([-90.0, 0.0, 0.0]), // Bottom
             // 8 cube corners (45° rotations)
             Self::from_array([45.0, 45.0, 0.0]),
             Self::from_array([45.0, 135.0, 0.0]),
@@ -309,7 +313,7 @@ pub struct CaptureTarget;
 pub struct CaptureCamera;
 
 // Re-export bevy types that consumers will need
-pub use bevy::prelude::{Transform, Vec3, Quat};
+pub use bevy::prelude::{Quat, Transform, Vec3};
 
 #[cfg(test)]
 mod tests {
