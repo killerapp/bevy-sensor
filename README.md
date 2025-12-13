@@ -56,16 +56,18 @@ Requires: `apt-get install xvfb mesa-utils libgl1-mesa-dri`
 
 The application will:
 1. Load the specified 3D model
-2. Cycle through 8 camera viewpoints arranged in a circle
-3. Save screenshots as `capture_0.png`, `capture_1.png`, etc.
+2. Cycle through 24 camera viewpoints (8 yaw × 3 pitch angles)
+3. Save screenshots as `capture_0.png` through `capture_23.png`
 4. Exit automatically after capturing all views
 
 ## Configuration
 
-Edit `src/main.rs` to customize:
-- `radius`: Camera distance from the model center
-- `height`: Camera height
-- `count`: Number of viewpoints to capture
+Edit `src/main.rs` `ViewpointConfig` to customize:
+- `radius`: Camera distance from the model center (default: 0.5m)
+- `yaw_count`: Number of horizontal positions (default: 8)
+- `pitch_angles_deg`: Elevation angles in degrees (default: [-30°, 0°, +30°])
+
+The viewpoint system uses spherical coordinates matching the [Thousand Brains Project](https://github.com/thousandbrainsproject/tbp.monty) habitat sensor conventions.
 
 ## License
 
