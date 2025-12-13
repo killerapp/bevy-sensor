@@ -990,7 +990,9 @@ mod tests {
     #[test]
     fn test_render_output_get_rgba() {
         let output = RenderOutput {
-            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255],
+            rgba: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ],
             depth: vec![1.0, 2.0, 3.0, 4.0],
             width: 2,
             height: 2,
@@ -1033,7 +1035,9 @@ mod tests {
     #[test]
     fn test_render_output_to_rgb_image() {
         let output = RenderOutput {
-            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255],
+            rgba: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ],
             depth: vec![1.0, 2.0, 3.0, 4.0],
             width: 2,
             height: 2,
