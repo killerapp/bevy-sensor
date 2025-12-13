@@ -16,3 +16,4 @@ bevy = { version = "0.11", default-features = false, features = [
     "x11",  # For windowing on Linux
 ] }
 bevy_obj = "0.11"
+ycbust = "0.2.3"
