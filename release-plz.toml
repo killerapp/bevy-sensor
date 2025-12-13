@@ -1,0 +1,3 @@
+[workspace]
+# Allow dirty working directory (assets/ycb symlink is gitignored but present locally)
+allow_dirty = true
