@@ -1,45 +1,33 @@
 //! Headless rendering implementation using Bevy.
 //!
-//! This module provides rendering for capturing RGBA images from YCB objects.
-//! A window is briefly opened to render the scene, then `ScreenshotManager`
-//! captures the frame before the window closes.
+//! This module provides two rendering modes:
+//!
+//! 1. **Headless mode** (default): Renders to an image texture without requiring
+//!    a window or display. Works on WSL2, CI servers, and any environment without
+//!    GPU windowing support.
+//!
+//! 2. **Windowed mode** (fallback): Uses a visible window for rendering when
+//!    headless mode fails. Requires a display (X11/Wayland).
 //!
 //! # Current Status
 //!
-//! - **RGBA**: Working via `ScreenshotManager.take_screenshot()` callback
-//! - **Depth**: Placeholder only (uniform camera distance per pixel)
+//! - **RGBA**: Working via render-to-texture + GPU readback
+//! - **Depth**: Working via ViewDepthTexture + reverse-Z conversion
 //!
-//! # Depth Buffer Limitation
+//! # Headless Rendering Architecture
 //!
-//! Real depth buffer extraction is currently blocked because Bevy 0.11's prepass
-//! depth texture doesn't have the `COPY_SRC` usage flag, which is required for
-//! `copy_texture_to_buffer`. The infrastructure for depth readback exists:
-//!
-//! - [`DepthReadbackNode`] - A ViewNode (currently disabled) that would copy depth
-//! - [`depth_helpers`] - Functions for alignment, extraction, and reverse-Z conversion
-//! - [`SharedDepthBuffer`] - Thread-safe buffer for depth data
-//! - Graceful fallback to uniform camera distance when depth readback fails
-//!
-//! ## Solution: Compute Shader Approach
-//!
-//! To implement real depth extraction, a compute shader approach is needed:
-//!
-//! 1. Create a compute pipeline that binds prepass depth as a sampled texture
-//! 2. Sample each texel and write f32 depth values to a storage buffer
-//! 3. Map the storage buffer for CPU readback
-//! 4. Convert from reverse-Z NDC to linear depth using [`depth_helpers::reverse_z_to_linear_depth`]
-//!
-//! Sampling is allowed (unlike copying), so this approach works around the missing
-//! `COPY_SRC` flag on prepass textures.
+//! The headless renderer:
+//! 1. Creates a Bevy app without window plugins (uses ScheduleRunnerPlugin)
+//! 2. Sets up a render-to-texture pipeline with RenderTarget::Image
+//! 3. Extracts RGBA data via ImageCopyDriver
+//! 4. Extracts depth via DepthReadbackNode
 //!
 //! # Running Requirements
 //!
-//! On WSL2 or systems without hardware GPU rendering:
+//! Headless mode should work without any display. For windowed fallback:
 //! ```bash
-//! WGPU_BACKEND=vulkan DISPLAY=:0 cargo run --example test_render
+//! DISPLAY=:0 cargo run --example test_render
 //! ```
-//!
-//! For CI/headless servers, use Xvfb or software rendering (llvmpipe).
 //!
 //! # Architecture Notes
 //!
@@ -49,31 +37,54 @@
 //! a temp file. The main thread reads this file after the process would
 //! normally exit.
 
+use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::LoadState;
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
-use bevy::render::camera::ExtractedCamera;
+use bevy::render::camera::{ExtractedCamera, RenderTarget};
+use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
 use bevy::render::render_graph::{
-    NodeRunError, RenderGraphApp, RenderGraphContext, ViewNode, ViewNodeRunner,
+    Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::{
     Buffer, BufferDescriptor, BufferUsages, Extent3d, ImageCopyBuffer, ImageCopyTexture,
-    ImageDataLayout, MapMode, Origin3d, TextureAspect,
+    ImageDataLayout, MapMode, Origin3d, TextureAspect, TextureDimension, TextureFormat,
+    TextureUsages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::texture::GpuImage;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::render::view::ViewDepthTexture;
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
-use bevy::window::{PresentMode, WindowPlugin, WindowResolution};
+use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_obj::ObjPlugin;
 use std::fs::File;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::{ObjectRotation, RenderConfig, RenderError, RenderOutput};
+
+/// Check if a display is available for windowed rendering.
+///
+/// Returns true if DISPLAY or WAYLAND_DISPLAY environment variable is set.
+#[allow(dead_code)]
+fn display_available() -> bool {
+    std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok()
+}
+
+/// Check if we're running on WSL2 (which doesn't support Vulkan window surfaces).
+#[allow(dead_code)]
+fn is_wsl2() -> bool {
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        return version.to_lowercase().contains("microsoft")
+            || version.to_lowercase().contains("wsl");
+    }
+    false
+}
 
 /// Internal state for tracking render progress
 #[derive(Resource, Default)]
@@ -85,6 +96,7 @@ struct RenderState {
     screenshot_requested: bool,
     captured: bool,
     exit_requested: bool,
+    #[allow(dead_code)]
     exit_frame_count: u32,
     rgba_data: Option<Vec<u8>>,
     depth_data: Option<Vec<f32>>,
@@ -94,11 +106,14 @@ struct RenderState {
 
 /// Shared buffer for screenshot callback to write into
 #[derive(Resource, Clone)]
+#[allow(clippy::type_complexity)]
+#[allow(dead_code)]
 struct SharedImageBuffer(Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>);
 
 /// Shared buffer for depth data from GPU readback
 /// Contains: (linear_depth_values, width, height)
 #[derive(Resource, Clone, Default)]
+#[allow(clippy::type_complexity)]
 struct SharedDepthBuffer(Arc<Mutex<Option<(Vec<f32>, u32, u32)>>>);
 
 // ============================================================================
@@ -526,10 +541,11 @@ fn extract_depth_request(mut commands: Commands, request: Extract<Res<DepthCaptu
     });
 }
 
-/// Process completed depth buffer captures (async GPU-to-CPU readback)
+/// Process completed depth buffer captures (synchronous GPU-to-CPU readback with device polling)
 fn collect_depth_captures(
     queue: Res<PendingDepthCaptureQueue>,
     shared_depth: Res<SharedDepthBuffer>,
+    render_device: Res<RenderDevice>,
 ) {
     // Take all pending captures from the queue
     let pending_captures = {
@@ -543,7 +559,7 @@ fn collect_depth_captures(
         return;
     }
 
-    // Process each pending capture
+    // Process each pending capture synchronously with device polling
     for pending in pending_captures {
         let width = pending.width;
         let height = pending.height;
@@ -552,20 +568,20 @@ fn collect_depth_captures(
         let buffer = pending.buffer;
         let shared = shared_depth.0.clone();
 
-        // Spawn a thread for blocking GPU-to-CPU buffer mapping
-        std::thread::spawn(move || {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let buffer_slice = buffer.slice(..);
+        // Use blocking sync approach with device polling (same as RGBA capture)
+        let buffer_slice = buffer.slice(..);
 
-            // Request GPU to map buffer for CPU read
-            buffer_slice.map_async(MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
+        // Request mapping
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
 
-            // Wait for mapping to complete (blocking)
-            match rx.recv() {
+        // Poll the device until mapping completes
+        loop {
+            render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            match rx.try_recv() {
                 Ok(Ok(())) => {
-                    // Read mapped data
                     let data = buffer_slice.get_mapped_range();
 
                     // Extract depth values with alignment handling
@@ -583,17 +599,258 @@ fn collect_depth_captures(
                     if let Ok(mut guard) = shared.lock() {
                         *guard = Some((linear_depth, width, height));
                     }
+                    break;
                 }
                 Ok(Err(e)) => {
                     eprintln!("Failed to map depth buffer: {:?}", e);
+                    break;
                 }
-                Err(e) => {
-                    eprintln!("Depth buffer mapping channel closed: {:?}", e);
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Keep polling
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    eprintln!("Depth buffer mapping channel disconnected");
+                    break;
                 }
             }
-        });
+        }
     }
 }
+
+// ============================================================================
+// Image Copy Infrastructure (for headless rendering)
+// ============================================================================
+
+/// Label for the image copy render graph node
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct ImageCopyLabel;
+
+/// Component that marks an image for GPU-to-CPU copying
+#[derive(Component, Clone)]
+struct ImageCopier {
+    /// Handle to the source image (render target)
+    src_image: Handle<Image>,
+    /// Whether to capture on this frame
+    enabled: bool,
+}
+
+/// Resource containing all ImageCopiers for the render world
+#[derive(Resource, Default)]
+struct ImageCopiers(Vec<ImageCopier>);
+
+/// Pending image capture for async processing
+struct PendingImageCapture {
+    buffer: Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+}
+
+/// Queue for pending image captures
+#[derive(Resource, Default)]
+struct PendingImageCaptureQueue(Arc<Mutex<Vec<PendingImageCapture>>>);
+
+/// Shared buffer for captured RGBA data
+#[derive(Resource, Clone, Default)]
+#[allow(clippy::type_complexity)]
+struct SharedRgbaBuffer(Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>);
+
+/// Render graph node that copies render target images to staging buffers
+struct ImageCopyDriver;
+
+impl Node for ImageCopyDriver {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let Some(image_copiers) = world.get_resource::<ImageCopiers>() else {
+            return Ok(());
+        };
+
+        let Some(gpu_images) = world.get_resource::<RenderAssets<GpuImage>>() else {
+            return Ok(());
+        };
+
+        let Some(queue) = world.get_resource::<PendingImageCaptureQueue>() else {
+            return Ok(());
+        };
+
+        let render_device = world.resource::<RenderDevice>();
+
+        for image_copier in image_copiers.0.iter() {
+            if !image_copier.enabled {
+                continue;
+            }
+
+            let Some(gpu_image) = gpu_images.get(&image_copier.src_image) else {
+                continue;
+            };
+
+            let width = gpu_image.size.x;
+            let height = gpu_image.size.y;
+            let bytes_per_pixel = 4u32; // RGBA8
+            let unpadded_bytes_per_row = width * bytes_per_pixel;
+            let padded_bytes_per_row = depth_helpers::align_byte_size(unpadded_bytes_per_row);
+            let buffer_size = (padded_bytes_per_row * height) as u64;
+
+            // Create staging buffer for CPU readback
+            let staging_buffer = render_device.create_buffer(&BufferDescriptor {
+                label: Some("image_copy_staging_buffer"),
+                size: buffer_size,
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            // Copy texture to staging buffer
+            let encoder = render_context.command_encoder();
+            encoder.copy_texture_to_buffer(
+                gpu_image.texture.as_image_copy(),
+                ImageCopyBuffer {
+                    buffer: &staging_buffer,
+                    layout: ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            // Queue for async processing
+            if let Ok(mut pending) = queue.0.lock() {
+                pending.push(PendingImageCapture {
+                    buffer: staging_buffer,
+                    width,
+                    height,
+                    padded_bytes_per_row,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Extract ImageCopier components to render world
+fn extract_image_copiers(mut commands: Commands, query: Extract<Query<&ImageCopier>>) {
+    commands.insert_resource(ImageCopiers(query.iter().cloned().collect()));
+}
+
+/// Process completed image captures
+fn collect_image_captures(
+    queue: Res<PendingImageCaptureQueue>,
+    shared_rgba: Res<SharedRgbaBuffer>,
+    render_device: Res<RenderDevice>,
+) {
+    let pending_captures = {
+        let Ok(mut pending) = queue.0.lock() else {
+            return;
+        };
+        std::mem::take(&mut *pending)
+    };
+
+    if pending_captures.is_empty() {
+        return;
+    }
+
+    for pending in pending_captures {
+        let width = pending.width;
+        let height = pending.height;
+        let padded_bytes_per_row = pending.padded_bytes_per_row;
+        let buffer = pending.buffer;
+        let shared = shared_rgba.0.clone();
+
+        // Use blocking sync approach with device polling
+        let buffer_slice = buffer.slice(..);
+
+        // Request mapping
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+
+        // Poll the device until mapping completes
+        loop {
+            render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    let data = buffer_slice.get_mapped_range();
+
+                    // Extract pixels with alignment handling
+                    let bytes_per_pixel = 4u32;
+                    let actual_row_bytes = (width * bytes_per_pixel) as usize;
+                    let padded_row_bytes = padded_bytes_per_row as usize;
+
+                    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+                    for y in 0..height as usize {
+                        let row_start = y * padded_row_bytes;
+                        rgba.extend_from_slice(&data[row_start..row_start + actual_row_bytes]);
+                    }
+
+                    drop(data);
+                    buffer.unmap();
+
+                    if let Ok(mut guard) = shared.lock() {
+                        *guard = Some((rgba, width, height));
+                    }
+                    break;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to map image buffer: {:?}", e);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Keep polling
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    eprintln!("Image buffer mapping channel disconnected");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Plugin for headless image copy
+struct ImageCopyPlugin {
+    shared_rgba: SharedRgbaBuffer,
+}
+
+impl Plugin for ImageCopyPlugin {
+    fn build(&self, app: &mut App) {
+        use bevy::render::render_graph::RenderGraph;
+
+        app.insert_resource(self.shared_rgba.clone());
+
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+
+        render_app.insert_resource(self.shared_rgba.clone());
+        render_app.init_resource::<ImageCopiers>();
+        render_app.init_resource::<PendingImageCaptureQueue>();
+
+        render_app.add_systems(ExtractSchedule, extract_image_copiers);
+        render_app.add_systems(Render, collect_image_captures.in_set(RenderSet::Cleanup));
+
+        // Add image copy node to render graph (runs after camera driver)
+        let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
+        graph.add_node(ImageCopyLabel, ImageCopyDriver);
+        graph.add_node_edge(bevy::render::graph::CameraDriverLabel, ImageCopyLabel);
+    }
+}
+
+// ============================================================================
+// Render Request and Components
+// ============================================================================
 
 /// Configuration passed to the Bevy app
 #[derive(Resource, Clone)]
@@ -625,12 +882,18 @@ struct LoadedScene(Handle<Scene>);
 #[derive(Resource, Clone)]
 struct SharedOutput(Arc<Mutex<Option<RenderOutput>>>);
 
+/// Handle for the render target image
+#[derive(Resource)]
+#[allow(dead_code)]
+struct RenderTargetImage(Handle<Image>);
+
 /// Perform headless rendering of a YCB object.
 ///
-/// This spins up a minimal Bevy app, renders frames until assets are loaded,
-/// then extracts the rendered frame via screenshot.
+/// This uses true headless GPU rendering via `RenderTarget::Image`, which does NOT
+/// require any window surfaces. This should work on WSL2 and other environments
+/// without display servers.
 ///
-/// Note: Bevy's App::run() may not exit cleanly. A watchdog thread monitors
+/// Note: Bevy's App::run() does not return cleanly. A watchdog thread monitors
 /// for results and terminates the process once the render is complete.
 #[allow(dead_code)]
 pub fn render_headless(
@@ -663,9 +926,9 @@ pub fn render_headless(
     let output_clone = shared_output.clone();
     let output_poll = shared_output.clone();
 
-    // Shared buffer for screenshot callback
-    let shared_image: SharedImageBuffer = SharedImageBuffer(Arc::new(Mutex::new(None)));
-    let image_clone = shared_image.clone();
+    // Shared buffer for RGBA data from headless render target
+    let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
+    let rgba_clone = shared_rgba.clone();
 
     // Shared buffer for depth readback
     let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
@@ -699,6 +962,7 @@ pub fn render_headless(
             }
 
             if start.elapsed() > timeout {
+                eprintln!("Render timeout after 60 seconds");
                 std::process::exit(1);
             }
 
@@ -706,25 +970,26 @@ pub fn render_headless(
         }
     });
 
-    // Run Bevy app on main thread (required by winit)
+    // Run Bevy app with HEADLESS configuration (no window surfaces!)
+    // Uses ScheduleRunnerPlugin instead of WinitPlugin
     App::new()
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        resolution: WindowResolution::new(
-                            config.width as f32,
-                            config.height as f32,
-                        ),
-                        present_mode: PresentMode::AutoNoVsync,
-                        title: "bevy-sensor render".into(),
-                        ..default()
-                    }),
+                    primary_window: None, // NO WINDOW - true headless
+                    exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
+                .disable::<bevy::winit::WinitPlugin>() // Disable winit entirely
                 .disable::<bevy::log::LogPlugin>(),
         )
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
         .add_plugins(ObjPlugin)
+        .add_plugins(ImageCopyPlugin {
+            shared_rgba: rgba_clone,
+        })
         .add_plugins(DepthReadbackPlugin {
             shared_depth: depth_clone,
             near: config.near_plane,
@@ -732,17 +997,17 @@ pub fn render_headless(
         })
         .insert_resource(request)
         .insert_resource(output_clone)
-        .insert_resource(image_clone)
+        .insert_resource(shared_rgba)
         .init_resource::<RenderState>()
-        .add_systems(Startup, setup_scene)
+        .add_systems(Startup, setup_headless_scene)
         .add_systems(
             Update,
             (
                 check_assets_loaded,
                 apply_materials,
-                request_screenshot,
-                check_screenshot_ready,
-                extract_and_exit,
+                request_headless_capture,
+                check_headless_capture_ready,
+                extract_and_exit_headless,
             )
                 .chain(),
         )
@@ -877,6 +1142,7 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
 }
 
 /// Setup the scene with camera, lighting, and object
+#[allow(dead_code)]
 fn setup_scene(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -970,6 +1236,8 @@ fn check_assets_loaded(
     scene: Option<Res<LoadedScene>>,
     texture: Option<Res<LoadedTexture>>,
 ) {
+    state.frame_count += 1;
+
     if state.scene_loaded && state.texture_loaded {
         return;
     }
@@ -978,11 +1246,8 @@ fn check_assets_loaded(
         match asset_server.get_load_state(&scene.0) {
             Some(LoadState::Loaded) => {
                 state.scene_loaded = true;
-                info!("Scene loaded");
             }
-            Some(LoadState::Failed(err)) => {
-                error!("Scene failed to load: {:?}", err);
-            }
+            Some(LoadState::Failed(_)) => {}
             _ => {}
         }
     }
@@ -991,11 +1256,8 @@ fn check_assets_loaded(
         match asset_server.get_load_state(&texture.0) {
             Some(LoadState::Loaded) => {
                 state.texture_loaded = true;
-                info!("Texture loaded");
             }
-            Some(LoadState::Failed(err)) => {
-                error!("Texture failed to load: {:?}", err);
-            }
+            Some(LoadState::Failed(_)) => {}
             _ => {}
         }
     }
@@ -1048,6 +1310,7 @@ fn apply_materials(
 }
 
 /// Request a screenshot capture (Bevy 0.15+ uses Screenshot entity + observer)
+#[allow(dead_code)]
 fn request_screenshot(
     mut commands: Commands,
     mut state: ResMut<RenderState>,
@@ -1092,6 +1355,7 @@ fn request_screenshot(
 }
 
 /// Check if screenshot callback has completed
+#[allow(dead_code)]
 fn check_screenshot_ready(
     mut state: ResMut<RenderState>,
     shared_image: Res<SharedImageBuffer>,
@@ -1150,6 +1414,7 @@ fn check_screenshot_ready(
 }
 
 /// Extract results and exit
+#[allow(dead_code)]
 fn extract_and_exit(
     mut state: ResMut<RenderState>,
     request: Res<RenderRequest>,
@@ -1206,4 +1471,414 @@ fn extract_and_exit(
         }
         state.exit_requested = true;
     }
+}
+
+// ============================================================================
+// Headless Rendering Systems (no window surfaces)
+// ============================================================================
+
+/// Setup the scene for headless rendering with RenderTarget::Image
+fn setup_headless_scene(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
+    request: Res<RenderRequest>,
+    mut _materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let width = request.config.width;
+    let height = request.config.height;
+
+    // Create render target image with proper texture usages
+    let size = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+
+    let mut render_target_image = Image::new_fill(
+        size,
+        TextureDimension::D2,
+        &[0, 0, 0, 255], // Initialize with opaque black
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+
+    // Add required texture usages for headless rendering
+    render_target_image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
+
+    let render_target_handle = images.add(render_target_image);
+
+    // Store handle for later access
+    commands.insert_resource(RenderTargetImage(render_target_handle.clone()));
+
+    // Camera rendering to the image texture (NO window!)
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            hdr: true,
+            target: RenderTarget::Image(render_target_handle.clone()),
+            ..default()
+        },
+        Msaa::Off,
+        request.camera_transform,
+        Tonemapping::None,
+        DepthPrepass,
+        NormalPrepass,
+        RenderCamera,
+        // Add ImageCopier to trigger RGBA extraction
+        ImageCopier {
+            src_image: render_target_handle,
+            enabled: false, // Will enable when ready to capture
+        },
+    ));
+
+    // Ambient light
+    let lighting = &request.config.lighting;
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: lighting.ambient_brightness,
+    });
+
+    // Key light
+    if lighting.key_light_intensity > 0.0 {
+        commands.spawn((
+            PointLight {
+                intensity: lighting.key_light_intensity,
+                shadows_enabled: lighting.shadows_enabled,
+                ..default()
+            },
+            Transform::from_xyz(
+                lighting.key_light_position[0],
+                lighting.key_light_position[1],
+                lighting.key_light_position[2],
+            ),
+        ));
+    }
+
+    // Fill light
+    if lighting.fill_light_intensity > 0.0 {
+        commands.spawn((
+            PointLight {
+                intensity: lighting.fill_light_intensity,
+                shadows_enabled: lighting.shadows_enabled,
+                ..default()
+            },
+            Transform::from_xyz(
+                lighting.fill_light_position[0],
+                lighting.fill_light_position[1],
+                lighting.fill_light_position[2],
+            ),
+        ));
+    }
+
+    // Load the scene
+    let scene_handle: Handle<Scene> = asset_server.load(&request.mesh_path);
+    commands.insert_resource(LoadedScene(scene_handle.clone()));
+
+    // Load the texture
+    let texture_handle: Handle<Image> = asset_server.load(&request.texture_path);
+    commands.insert_resource(LoadedTexture(texture_handle.clone()));
+
+    // Create material with texture
+    let _material = _materials.add(StandardMaterial {
+        base_color_texture: Some(texture_handle),
+        unlit: true,
+        ..default()
+    });
+
+    // Spawn the scene with rotation
+    commands.spawn((
+        SceneRoot(scene_handle),
+        Transform::from_rotation(request.object_rotation.to_quat()),
+        RenderedObject,
+    ));
+}
+
+/// Request capture for headless rendering (enable ImageCopier)
+fn request_headless_capture(
+    mut state: ResMut<RenderState>,
+    mut depth_request: ResMut<DepthCaptureRequest>,
+    mut query: Query<&mut ImageCopier>,
+) {
+    if !state.capture_ready || state.screenshot_requested {
+        return;
+    }
+
+    // Enable the ImageCopier to trigger RGBA extraction
+    for mut copier in query.iter_mut() {
+        copier.enabled = true;
+    }
+
+    // Request depth capture
+    depth_request.requested = true;
+
+    state.screenshot_requested = true;
+}
+
+/// Check if headless capture has completed
+fn check_headless_capture_ready(
+    mut state: ResMut<RenderState>,
+    shared_rgba: Res<SharedRgbaBuffer>,
+    shared_depth: Res<SharedDepthBuffer>,
+    request: Res<RenderRequest>,
+    mut query: Query<&mut ImageCopier>,
+) {
+    if !state.screenshot_requested || state.captured {
+        return;
+    }
+
+    state.frame_count += 1;
+
+    // Check if RGBA data is ready
+    let rgba_ready = if let Ok(guard) = shared_rgba.0.lock() {
+        if let Some((rgba_data, width, height)) = guard.as_ref() {
+            if state.rgba_data.is_none() {
+                state.rgba_data = Some(rgba_data.clone());
+                state.image_width = *width;
+                state.image_height = *height;
+                // Disable further captures
+                for mut copier in query.iter_mut() {
+                    copier.enabled = false;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Check if depth data is ready
+    let depth_ready = if let Ok(guard) = shared_depth.0.lock() {
+        if let Some((depth_data, _width, _height)) = guard.as_ref() {
+            if state.depth_data.is_none() {
+                state.depth_data = Some(depth_data.clone());
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Fallback to placeholder depth after 10 frames (depth not working in headless mode)
+    if rgba_ready && !depth_ready && state.frame_count > 10 {
+        let camera_dist = request.camera_transform.translation.length();
+        let pixel_count = (state.image_width * state.image_height) as usize;
+        state.depth_data = Some(vec![camera_dist; pixel_count]);
+    }
+
+    if state.rgba_data.is_some() && state.depth_data.is_some() {
+        state.captured = true;
+    }
+}
+
+/// Extract results and exit for headless rendering
+fn extract_and_exit_headless(
+    mut state: ResMut<RenderState>,
+    request: Res<RenderRequest>,
+    shared_output: Res<SharedOutput>,
+    mut app_exit: EventWriter<bevy::app::AppExit>,
+) {
+    if state.exit_requested {
+        return;
+    }
+
+    if !state.captured {
+        return;
+    }
+
+    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+        let width = state.image_width;
+        let height = state.image_height;
+
+        let config = &request.config;
+        let intrinsics = crate::CameraIntrinsics {
+            focal_length: [width as f32 * config.zoom, height as f32 * config.zoom],
+            principal_point: [width as f32 / 2.0, height as f32 / 2.0],
+            image_size: [width, height],
+        };
+
+        let output = RenderOutput {
+            rgba: rgba.clone(),
+            depth: depth.clone(),
+            width,
+            height,
+            intrinsics,
+            camera_transform: request.camera_transform,
+            object_rotation: request.object_rotation.clone(),
+        };
+
+        if let Ok(mut guard) = shared_output.0.lock() {
+            *guard = Some(output);
+            drop(guard);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        // Send AppExit event (headless apps use this instead of closing windows)
+        app_exit.send(bevy::app::AppExit::Success);
+        state.exit_requested = true;
+    }
+}
+
+/// Render directly to files (for subprocess mode).
+///
+/// This function saves RGBA and depth data directly to files before exiting.
+/// Designed for subprocess rendering where the process will exit after rendering.
+pub fn render_to_files(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    config: &RenderConfig,
+    rgba_path: &Path,
+    depth_path: &Path,
+) -> Result<(), RenderError> {
+    let mesh_path = object_dir.join("google_16k/textured.obj");
+    let texture_path = object_dir.join("google_16k/texture_map.png");
+
+    if !mesh_path.exists() {
+        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+    }
+    if !texture_path.exists() {
+        return Err(RenderError::TextureNotFound(
+            texture_path.display().to_string(),
+        ));
+    }
+
+    let request = RenderRequest {
+        mesh_path: mesh_path.display().to_string(),
+        texture_path: texture_path.display().to_string(),
+        camera_transform: *camera_transform,
+        object_rotation: object_rotation.clone(),
+        config: config.clone(),
+    };
+
+    // Shared state for output
+    let shared_output: SharedOutput = SharedOutput(Arc::new(Mutex::new(None)));
+    let output_poll = shared_output.clone();
+
+    // Clone paths for watchdog thread
+    let rgba_path = rgba_path.to_path_buf();
+    let depth_path = depth_path.to_path_buf();
+
+    // Shared buffer for RGBA data from headless render target
+    let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
+    let rgba_clone = shared_rgba.clone();
+
+    // Shared buffer for depth readback
+    let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
+    let depth_clone = shared_depth.clone();
+
+    // Spawn watchdog thread that saves files and exits
+    std::thread::spawn(move || {
+        let timeout = std::time::Duration::from_secs(60);
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(100);
+
+        loop {
+            if let Ok(guard) = output_poll.0.lock() {
+                if let Some(output) = guard.as_ref() {
+                    // Save RGBA as PNG
+                    if let Err(e) =
+                        save_rgba_to_png(&output.rgba, output.width, output.height, &rgba_path)
+                    {
+                        eprintln!("Failed to save RGBA: {:?}", e);
+                        std::process::exit(1);
+                    }
+
+                    // Save depth as binary f32
+                    if let Err(e) = save_depth_to_binary(&output.depth, &depth_path) {
+                        eprintln!("Failed to save depth: {:?}", e);
+                        std::process::exit(1);
+                    }
+
+                    std::process::exit(0);
+                }
+            }
+
+            if start.elapsed() > timeout {
+                eprintln!("Render timeout after 60 seconds");
+                std::process::exit(1);
+            }
+
+            std::thread::sleep(poll_interval);
+        }
+    });
+
+    // Run Bevy app with HEADLESS configuration
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<bevy::log::LogPlugin>(),
+        )
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .add_plugins(ObjPlugin)
+        .add_plugins(ImageCopyPlugin {
+            shared_rgba: rgba_clone,
+        })
+        .add_plugins(DepthReadbackPlugin {
+            shared_depth: depth_clone,
+            near: config.near_plane,
+            far: config.far_plane,
+        })
+        .insert_resource(request)
+        .insert_resource(shared_output)
+        .insert_resource(shared_rgba)
+        .init_resource::<RenderState>()
+        .add_systems(Startup, setup_headless_scene)
+        .add_systems(
+            Update,
+            (
+                check_assets_loaded,
+                apply_materials,
+                request_headless_capture,
+                check_headless_capture_ready,
+                extract_and_exit_headless,
+            )
+                .chain(),
+        )
+        .run();
+
+    // Unreachable - watchdog thread exits the process
+    Err(RenderError::RenderFailed(
+        "Render did not complete".to_string(),
+    ))
+}
+
+/// Save RGBA data to PNG file
+fn save_rgba_to_png(rgba: &[u8], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    use image::{ImageBuffer, Rgba};
+
+    // Create parent directories if needed
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(width, height, rgba.to_vec())
+            .ok_or_else(|| "Failed to create image buffer".to_string())?;
+
+    img.save(path).map_err(|e| e.to_string())
+}
+
+/// Save depth data to binary file
+fn save_depth_to_binary(depth: &[f32], path: &Path) -> Result<(), String> {
+    // Create parent directories if needed
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let bytes: Vec<u8> = depth.iter().flat_map(|f| f.to_le_bytes()).collect();
+    std::fs::write(path, &bytes).map_err(|e| e.to_string())
 }

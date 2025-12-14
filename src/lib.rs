@@ -706,6 +706,40 @@ pub fn render_all_viewpoints(
     Ok(outputs)
 }
 
+/// Render directly to files (for subprocess mode).
+///
+/// This function is designed for subprocess rendering where the process will exit
+/// after rendering. It saves RGBA and depth data directly to the specified files
+/// before the process terminates.
+///
+/// # Arguments
+/// * `object_dir` - Path to YCB object directory
+/// * `camera_transform` - Camera position and orientation
+/// * `object_rotation` - Rotation to apply to the object
+/// * `config` - Render configuration
+/// * `rgba_path` - Output path for RGBA PNG
+/// * `depth_path` - Output path for depth data (raw f32 bytes)
+///
+/// # Note
+/// This function may call `std::process::exit(0)` and not return.
+pub fn render_to_files(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    config: &RenderConfig,
+    rgba_path: &Path,
+    depth_path: &Path,
+) -> Result<(), RenderError> {
+    render::render_to_files(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        config,
+        rgba_path,
+        depth_path,
+    )
+}
+
 // Re-export bevy types that consumers will need
 pub use bevy::prelude::{Quat, Transform, Vec3};
 

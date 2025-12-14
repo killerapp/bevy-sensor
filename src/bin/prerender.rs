@@ -8,16 +8,17 @@
 //!
 //! Default output: test_fixtures/renders/
 //! Default objects: 003_cracker_box, 005_tomato_soup_can
+//!
+//! For single-render mode (used internally for subprocess rendering):
+//!   cargo run --bin prerender -- --single-render --object <name> --rotation <idx> --viewpoint <idx> --output <dir>
 
 use bevy_sensor::ycb;
-use bevy_sensor::{
-    generate_viewpoints, ObjectRotation, RenderConfig, RenderOutput, ViewpointConfig,
-};
-use image::{ImageBuffer, Rgba};
+use bevy_sensor::{generate_viewpoints, ObjectRotation, RenderConfig, ViewpointConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::process::Command;
 
 /// Metadata for a pre-rendered dataset
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,9 +75,72 @@ const CI_TEST_OBJECTS: &[&str] = &["003_cracker_box", "005_tomato_soup_can"];
 fn main() {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for single-render mode (used by batch subprocess)
+    if args.iter().any(|a| a == "--single-render") {
+        run_single_render(&args);
+        return;
+    }
+
+    // Batch mode
+    run_batch_render(&args);
+}
+
+/// Run a single render (subprocess mode)
+fn run_single_render(args: &[String]) {
+    let object_id = parse_arg(args, "--object").expect("--object required for single-render");
+    let rotation_idx: usize = parse_arg(args, "--rotation")
+        .expect("--rotation required")
+        .parse()
+        .expect("--rotation must be a number");
+    let viewpoint_idx: usize = parse_arg(args, "--viewpoint")
+        .expect("--viewpoint required")
+        .parse()
+        .expect("--viewpoint must be a number");
     let output_dir =
-        parse_arg(&args, "--output-dir").unwrap_or_else(|| "test_fixtures/renders".to_string());
-    let objects_arg = parse_arg(&args, "--objects");
+        parse_arg(args, "--output").unwrap_or_else(|| "test_fixtures/renders".to_string());
+
+    let ycb_dir = PathBuf::from("/tmp/ycb");
+    let object_dir = ycb_dir.join(&object_id);
+
+    let render_config = RenderConfig::tbp_default();
+    let viewpoint_config = ViewpointConfig::default();
+    let rotations = ObjectRotation::tbp_benchmark_rotations();
+    let viewpoints = generate_viewpoints(&viewpoint_config);
+
+    let rotation = &rotations[rotation_idx];
+    let viewpoint = &viewpoints[viewpoint_idx];
+
+    // Create output directory
+    let object_output = PathBuf::from(&output_dir).join(&object_id);
+    fs::create_dir_all(&object_output).expect("Failed to create output directory");
+
+    // Output paths
+    let rgba_path = object_output.join(format!("r{}_v{:02}.png", rotation_idx, viewpoint_idx));
+    let depth_path = object_output.join(format!("r{}_v{:02}.depth", rotation_idx, viewpoint_idx));
+
+    // Render directly to files - this function will call process::exit() when done
+    let result = bevy_sensor::render_to_files(
+        &object_dir,
+        viewpoint,
+        rotation,
+        &render_config,
+        &rgba_path,
+        &depth_path,
+    );
+
+    // Only reached on error (render_to_files calls process::exit on success)
+    if let Err(e) = result {
+        eprintln!("RENDER_ERROR: {:?}", e);
+        std::process::exit(1);
+    }
+}
+
+/// Run batch rendering (main mode)
+fn run_batch_render(args: &[String]) {
+    let output_dir =
+        parse_arg(args, "--output-dir").unwrap_or_else(|| "test_fixtures/renders".to_string());
+    let objects_arg = parse_arg(args, "--objects");
 
     let objects: Vec<String> = if let Some(objs) = objects_arg {
         objs.split(',').map(|s| s.trim().to_string()).collect()
@@ -149,7 +213,10 @@ fn main() {
     fs::write(&metadata_path, &metadata_json).expect("Failed to write metadata");
     println!("\nSaved dataset metadata to {:?}", metadata_path);
 
-    // Render each object
+    // Get the current executable path for subprocess spawning
+    let exe_path = std::env::current_exe().expect("Failed to get current executable path");
+
+    // Render each object using subprocesses
     let mut all_render_metadata: HashMap<String, Vec<RenderMetadata>> = HashMap::new();
 
     for object_id in &objects {
@@ -168,25 +235,26 @@ fn main() {
 
         let mut object_renders: Vec<RenderMetadata> = Vec::new();
         let mut render_count = 0;
+        let total_renders = viewpoints.len() * rotations.len();
 
         for (rot_idx, rotation) in rotations.iter().enumerate() {
             for (view_idx, viewpoint) in viewpoints.iter().enumerate() {
-                // Render
-                let result =
-                    bevy_sensor::render_to_buffer(&object_dir, viewpoint, rotation, &render_config);
+                // Spawn subprocess to render this viewpoint
+                let status = Command::new(&exe_path)
+                    .arg("--single-render")
+                    .arg("--object")
+                    .arg(object_id)
+                    .arg("--rotation")
+                    .arg(rot_idx.to_string())
+                    .arg("--viewpoint")
+                    .arg(view_idx.to_string())
+                    .arg("--output")
+                    .arg(&output_dir)
+                    .env("WGPU_BACKEND", "vulkan")
+                    .status();
 
-                match result {
-                    Ok(output) => {
-                        // Save RGBA as PNG
-                        let rgba_filename = format!("r{}_v{:02}.png", rot_idx, view_idx);
-                        let rgba_path = object_output.join(&rgba_filename);
-                        save_rgba_png(&output, &rgba_path);
-
-                        // Save depth as binary f32
-                        let depth_filename = format!("r{}_v{:02}.depth", rot_idx, view_idx);
-                        let depth_path = object_output.join(&depth_filename);
-                        save_depth_binary(&output, &depth_path);
-
+                match status {
+                    Ok(exit_status) if exit_status.success() => {
                         // Record metadata
                         let camera_pos = viewpoint.translation;
                         object_renders.push(RenderMetadata {
@@ -195,19 +263,26 @@ fn main() {
                             viewpoint_index: view_idx,
                             rotation_euler: [rotation.pitch, rotation.yaw, rotation.roll],
                             camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
-                            rgba_file: rgba_filename,
-                            depth_file: depth_filename,
+                            rgba_file: format!("r{}_v{:02}.png", rot_idx, view_idx),
+                            depth_file: format!("r{}_v{:02}.depth", rot_idx, view_idx),
                         });
 
                         render_count += 1;
-                        print!(
-                            "\r  Rendered {}/{}",
-                            render_count,
-                            viewpoints.len() * rotations.len()
+                        print!("\r  Rendered {}/{}", render_count, total_renders);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                    Ok(exit_status) => {
+                        println!(
+                            "\n  ERROR rendering r{}_v{}: subprocess exited with {:?}",
+                            rot_idx, view_idx, exit_status
                         );
                     }
                     Err(e) => {
-                        println!("\n  ERROR rendering r{}_v{}: {:?}", rot_idx, view_idx, e);
+                        println!(
+                            "\n  ERROR rendering r{}_v{}: failed to spawn subprocess: {:?}",
+                            rot_idx, view_idx, e
+                        );
                     }
                 }
             }
@@ -240,19 +315,4 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
-}
-
-fn save_rgba_png(output: &RenderOutput, path: &Path) {
-    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(output.width, output.height, output.rgba.clone())
-            .expect("Failed to create image buffer");
-
-    img.save(path).expect("Failed to save PNG");
-}
-
-fn save_depth_binary(output: &RenderOutput, path: &Path) {
-    // Save as raw f32 bytes (little-endian)
-    let bytes: Vec<u8> = output.depth.iter().flat_map(|f| f.to_le_bytes()).collect();
-
-    fs::write(path, &bytes).expect("Failed to save depth");
 }
