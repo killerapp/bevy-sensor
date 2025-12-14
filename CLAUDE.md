@@ -10,7 +10,7 @@ A Bevy library and CLI that captures multi-view images of 3D OBJ models (YCB dat
 # Build
 cargo build --release
 
-# Run tests (38 tests)
+# Run tests (69 tests)
 cargo test
 
 # Run (requires GPU or proper software rendering)
@@ -118,8 +118,8 @@ let pixel = intrinsics.project(point_3d);  // Option<[f32; 2]>
 let point = intrinsics.unproject([32.0, 32.0], depth);  // Vec3
 ```
 
-> **Note:** Current implementation returns placeholder data. Full GPU rendering
-> requires a display (X11/Wayland). Use Xvfb for headless servers.
+> **Note:** Full GPU rendering requires a display (X11/Wayland). The depth buffer
+> now returns real per-pixel depth values from GPU readback (Bevy 0.15+).
 
 ### Object Rotation (`ObjectRotation`)
 
@@ -225,34 +225,130 @@ The `assets/ycb` symlink points to `/tmp/ycb`.
 ## Dependencies
 
 ```toml
-bevy = { version = "0.11", default-features = false, features = [
+bevy = { version = "0.15", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_render",
+    "bevy_scene",
+    "bevy_state",
     "bevy_winit",
     "png",
     "x11",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd",
 ] }
-bevy_obj = "0.11"
+bevy_obj = { version = "0.15", features = ["scene"] }
 ycbust = "0.2.3"
 ```
 
+### Bevy 0.15 Upgrade (December 2024)
+
+The upgrade from Bevy 0.11 to 0.15 enabled real GPU depth buffer readback:
+
+**Key Changes:**
+- `ViewDepthTexture` replaces `ViewPrepassTextures` for depth access
+- `Screenshot` entity + observer pattern replaces `ScreenshotManager`
+- Component-based spawning (`Camera3d`, `PointLight`) replaces bundles
+- `Mesh3d` and `MeshMaterial3d<M>` wrappers for mesh/material handles
+- `SceneRoot(handle)` replaces `SceneBundle`
+- MSAA must be disabled (`Msaa::Off`) for depth texture copy
+
+**Depth Buffer Implementation:**
+- Uses `ViewDepthTexture` from `bevy::render::view`
+- Reverse-Z depth converted to linear meters via `reverse_z_to_linear_depth()`
+- Custom render graph node (`DepthReadbackNode`) copies depth after main pass
+- 256-byte row alignment for GPU buffer mapping
+
 ## Known Limitations
 
-1. **Software rendering (llvmpipe)**:
-   - **CRITICAL**: Must disable tonemapping (`Tonemapping::None`) on the camera, otherwise all materials render as magenta/pink (the "missing texture" fallback color). This is due to a bug in Bevy's PBR pipeline with llvmpipe.
-   - Run with `WGPU_BACKEND=vulkan DISPLAY=:0` for llvmpipe Vulkan rendering.
-   - PBR shaders may fail with `gsamplerCubeArrayShadow` error in some configurations.
+1. **WSL2 GPU rendering** (CRITICAL):
+   - WSL2 does NOT support Vulkan window surfaces, even with WSLg display
+   - `render_to_buffer()` will fail with "Invalid surface" error on WSL2
+   - **Solution**: Use pre-rendered fixtures for CI/CD (see below)
 
-2. **Texture loading with bevy_obj**:
-   - The bevy_obj scene loader has "limited MTL support" - textures may not load automatically.
-   - **Workaround**: Load textures manually with `asset_server.load()` and replace materials after scene spawns.
-   - MTL files with trailing spaces in texture paths (e.g., `map_Kd texture_map.png `) may cause texture loading failures.
+2. **Software rendering (llvmpipe)**:
+   - Must disable tonemapping (`Tonemapping::None`) on the camera
+   - PBR shaders may fail with `gsamplerCubeArrayShadow` error
+   - Xvfb may crash due to NVIDIA driver conflicts in WSL2
 
-3. **Asset path**: When running binary directly from `target/release/`, assets must be in `target/release/assets/`. Use `cargo run` to run from project root instead.
+3. **Texture loading with bevy_obj**:
+   - The bevy_obj scene loader has "limited MTL support"
+   - **Workaround**: Load textures manually with `asset_server.load()`
+   - MTL files with trailing spaces may cause loading failures
 
-4. **WSL2 GPU rendering**: WSL2 supports GPU compute (CUDA) but not windowed Vulkan rendering. Must use llvmpipe software rendering with the fixes above.
+4. **Asset path**: When running binary from `target/release/`, assets must be in `target/release/assets/`
+
+## Pre-rendered Fixtures for CI/CD
+
+For environments without GPU rendering (WSL2, CI servers, Docker), use pre-rendered fixtures:
+
+### Generating Fixtures
+
+Run on a machine with a working display (Linux desktop with GPU):
+
+```bash
+# Generate test fixtures for CI/CD
+cargo run --bin prerender -- --output-dir test_fixtures/renders
+
+# Custom objects
+cargo run --bin prerender -- --objects "003_cracker_box,005_tomato_soup_can,006_mustard_bottle"
+```
+
+This creates:
+- `test_fixtures/renders/metadata.json` - Dataset configuration
+- `test_fixtures/renders/{object_id}/` - Per-object renders
+  - `r{N}_v{M}.png` - RGBA images
+  - `r{N}_v{M}.depth` - Depth data (binary f32)
+  - `index.json` - Per-object metadata
+
+### Loading Fixtures in Tests
+
+```rust
+use bevy_sensor::fixtures::TestFixtures;
+
+// Load pre-rendered data
+let fixtures = TestFixtures::load("test_fixtures/renders")?;
+
+// Get a specific render
+let output = fixtures.get_render("003_cracker_box", 0, 0)?; // rotation 0, viewpoint 0
+
+// Use like normal RenderOutput
+let rgb = output.to_rgb_image();
+let depth = output.to_depth_image();
+```
+
+### neocortx Integration with Fixtures
+
+```rust
+// In neocortx tests, prefer fixtures for CI/CD compatibility
+#[cfg(test)]
+mod tests {
+    use bevy_sensor::fixtures::TestFixtures;
+
+    #[test]
+    fn test_sensor_with_fixtures() {
+        let fixtures = TestFixtures::load("test_fixtures/renders")
+            .expect("Pre-rendered fixtures required. Run: cargo run --bin prerender");
+
+        // Test with pre-rendered data
+        for (object_id, rotation_idx, viewpoint_idx, output) in fixtures.iter_renders() {
+            // Process render output...
+        }
+    }
+}
+```
+
+### WSL2 Workarounds
+
+If you need live rendering on WSL2, these options may work (unreliable):
+
+1. **VcXsrv on Windows**: Install VcXsrv, set `DISPLAY=172.x.x.x:0`
+2. **X410 on Windows**: Commercial X server with better GPU support
+3. **Native Linux VM**: Use VirtualBox/VMware with GPU passthrough
+
+**Recommended**: Generate fixtures on a Linux machine and commit to repo for CI/CD use.
 
 ## Viewpoint Coordinate Reference
 
@@ -294,6 +390,37 @@ println!("Total captures: {}", config.total_captures()); // 72
 - **tbp.monty**: Original Python implementation by Thousand Brains Project
 - **tbp.tbs_sensorimotor_intelligence**: TBP experiment configs
 - **ycbust**: YCB dataset downloader (used as library dependency)
+
+## API Parity with neocortx
+
+bevy-sensor provides complete API parity with neocortx's `bevy_simulator` module:
+
+| neocortx Requirement | bevy-sensor API | Status |
+|---------------------|-----------------|--------|
+| RGBA image data | `RenderOutput.rgba: Vec<u8>` | ✅ |
+| Depth buffer (meters) | `RenderOutput.depth: Vec<f32>` | ✅ |
+| Camera intrinsics | `CameraIntrinsics` struct | ✅ |
+| Camera position | `RenderOutput.camera_transform` | ✅ |
+| Object rotation | `RenderOutput.object_rotation` | ✅ |
+| RGB image format | `to_rgb_image() → Vec<Vec<[u8; 3]>>` | ✅ |
+| Depth image format | `to_depth_image() → Vec<Vec<f32>>` | ✅ |
+| TBP viewpoints (24) | `ViewpointConfig::default()` | ✅ |
+| TBP benchmark rotations (3) | `ObjectRotation::tbp_benchmark_rotations()` | ✅ |
+| TBP full rotations (14) | `ObjectRotation::tbp_known_orientations()` | ✅ |
+| YCB model download | `ycb::download_models()` | ✅ |
+| Resolution config | `RenderConfig` (64×64, 256×256, 512×512) | ✅ |
+
+**neocortx integration example:**
+
+```rust
+use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation};
+
+// Render and convert to neocortx formats
+let output = render_to_buffer(object_dir, &viewpoint, &rotation, &config)?;
+let rgb_image: Vec<Vec<[u8; 3]>> = output.to_rgb_image();    // VisionObservation.image
+let depth_image: Vec<Vec<f32>> = output.to_depth_image();    // For surface normal computation
+let intrinsics = output.intrinsics;                          // VisionIntrinsics
+```
 
 ## Resources
 
