@@ -9,6 +9,21 @@
 //! - **RGBA**: Working via `ScreenshotManager.take_screenshot()` callback
 //! - **Depth**: Placeholder only (uniform camera distance per pixel)
 //!
+//! # Depth Buffer Implementation
+//!
+//! The helper functions in [`depth_helpers`] are prepared for proper GPU depth
+//! extraction. The implementation requires:
+//!
+//! 1. Custom `ViewNode` that runs after the PREPASS
+//! 2. Access to `ViewPrepassTextures::depth` (Depth32Float texture)
+//! 3. Copy to staging buffer via `copy_texture_to_buffer`
+//! 4. Async GPU-to-CPU readback via `buffer.map_async()`
+//! 5. Handle 256-byte row alignment when extracting data
+//! 6. Convert reverse-Z NDC (0-1) to linear depth in meters
+//!
+//! The main challenge is coordinating async GPU readback with Bevy's split
+//! app architecture (main app vs render app run in separate worlds).
+//!
 //! # Running Requirements
 //!
 //! On WSL2 or systems without hardware GPU rendering:
@@ -60,6 +75,159 @@ struct RenderState {
 /// Shared buffer for screenshot callback to write into
 #[derive(Resource, Clone)]
 struct SharedImageBuffer(Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>);
+
+// ============================================================================
+// Depth Buffer Helpers (for future GPU readback implementation)
+// ============================================================================
+//
+// These helper functions are prepared for proper depth buffer extraction.
+// Currently, depth uses a uniform placeholder value. To implement real depth:
+//
+// 1. Create a custom render graph ViewNode that runs after PREPASS
+// 2. Access ViewPrepassTextures::depth (CachedTexture)
+// 3. Copy depth texture to a staging buffer via copy_texture_to_buffer
+// 4. Map staging buffer for CPU read via map_async (runs async after render)
+// 5. Extract f32 depth values, handling 256-byte row alignment
+// 6. Convert from reverse-Z NDC (0-1) to linear depth in meters
+//
+// The main challenge is coordinating async GPU readback with Bevy's render
+// architecture - the RenderApp runs separately from the main App.
+
+#[allow(dead_code)]
+mod depth_helpers {
+    /// wgpu requires buffer row alignment of 256 bytes
+    pub const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+
+    /// Align byte size to wgpu's COPY_BYTES_PER_ROW_ALIGNMENT
+    pub fn align_byte_size(value: u32) -> u32 {
+        let remainder = value % COPY_BYTES_PER_ROW_ALIGNMENT;
+        if remainder == 0 {
+            value
+        } else {
+            value + (COPY_BYTES_PER_ROW_ALIGNMENT - remainder)
+        }
+    }
+
+    /// Calculate aligned buffer size for an image
+    pub fn get_aligned_size(width: u32, height: u32, pixel_size: u32) -> u32 {
+        height * align_byte_size(width * pixel_size)
+    }
+
+    /// Convert reverse-Z NDC depth to linear depth in meters.
+    ///
+    /// Bevy uses reverse-Z depth buffer: near plane maps to depth=1, far plane to depth=0.
+    /// This provides better precision for distant objects.
+    ///
+    /// Formula derivation:
+    /// - At near plane (z = near): ndc = 1
+    /// - At far plane (z = far): ndc = 0
+    /// - linear = far / (1 + ndc * (far/near - 1))
+    pub fn reverse_z_to_linear_depth(ndc_depth: f32, near: f32, far: f32) -> f32 {
+        // Handle edge cases
+        if ndc_depth <= 0.0 {
+            return far; // Background (infinite distance in reverse-Z)
+        }
+        if ndc_depth >= 1.0 {
+            return near; // At or beyond near plane
+        }
+        // Reverse-Z formula: linear = far / (1 + ndc * (far/near - 1))
+        far / (1.0 + ndc_depth * (far / near - 1.0))
+    }
+
+    /// Extract depth values from aligned buffer, handling row padding
+    pub fn extract_depth_with_alignment(data: &[u8], width: u32, height: u32) -> Vec<f32> {
+        let pixel_size = 4u32; // f32 = 4 bytes
+        let aligned_row_bytes = align_byte_size(width * pixel_size) as usize;
+        let actual_row_bytes = (width * pixel_size) as usize;
+
+        let mut depth_values = Vec::with_capacity((width * height) as usize);
+
+        for y in 0..height as usize {
+            let row_start = y * aligned_row_bytes;
+            let row_data = &data[row_start..row_start + actual_row_bytes];
+
+            for x in 0..width as usize {
+                let offset = x * 4;
+                let bytes: [u8; 4] = row_data[offset..offset + 4].try_into().unwrap();
+                let depth_value = f32::from_le_bytes(bytes);
+                depth_values.push(depth_value);
+            }
+        }
+
+        depth_values
+    }
+
+    /// Convert all NDC depth values to linear meters
+    pub fn convert_depth_to_linear(raw_depth: &[f32], near: f32, far: f32) -> Vec<f32> {
+        raw_depth
+            .iter()
+            .map(|&ndc| reverse_z_to_linear_depth(ndc, near, far))
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_align_byte_size() {
+            assert_eq!(align_byte_size(256), 256);
+            assert_eq!(align_byte_size(257), 512);
+            assert_eq!(align_byte_size(1), 256);
+            assert_eq!(align_byte_size(512), 512);
+            assert_eq!(align_byte_size(0), 0);
+        }
+
+        #[test]
+        fn test_reverse_z_to_linear_depth() {
+            let near = 0.01;
+            let far = 10.0;
+
+            // Near plane (ndc=1 in reverse-Z)
+            let linear_near = reverse_z_to_linear_depth(1.0, near, far);
+            assert!((linear_near - near).abs() < 0.001);
+
+            // Mid-range depth (ndc=0.5 should give geometric mean area)
+            let linear_mid = reverse_z_to_linear_depth(0.5, near, far);
+            // At ndc=0.5: linear = 10 / (1 + 0.5 * (1000-1)) = 10 / 500.5 ≈ 0.02
+            assert!(linear_mid > near && linear_mid < far);
+
+            // Very close to far plane (ndc very small)
+            let linear_almost_far = reverse_z_to_linear_depth(0.0001, near, far);
+            // At ndc=0.0001: linear = 10 / (1 + 0.0001 * 999) ≈ 10 / 1.0999 ≈ 9.09
+            assert!(linear_almost_far > 9.0);
+
+            // Background (ndc=0)
+            let background = reverse_z_to_linear_depth(0.0, near, far);
+            assert_eq!(background, far);
+        }
+
+        #[test]
+        fn test_extract_depth_with_alignment() {
+            // 2x2 image, 4 bytes per pixel
+            // Aligned row = 256 bytes, but actual = 8 bytes
+            let width = 2u32;
+            let height = 2u32;
+
+            let mut data = vec![0u8; 256 * 2]; // 2 aligned rows
+
+            // Write test depth values
+            // Row 0: [0.5, 0.6]
+            data[0..4].copy_from_slice(&0.5f32.to_le_bytes());
+            data[4..8].copy_from_slice(&0.6f32.to_le_bytes());
+            // Row 1: [0.7, 0.8]
+            data[256..260].copy_from_slice(&0.7f32.to_le_bytes());
+            data[260..264].copy_from_slice(&0.8f32.to_le_bytes());
+
+            let depth = extract_depth_with_alignment(&data, width, height);
+            assert_eq!(depth.len(), 4);
+            assert!((depth[0] - 0.5).abs() < 0.001);
+            assert!((depth[1] - 0.6).abs() < 0.001);
+            assert!((depth[2] - 0.7).abs() < 0.001);
+            assert!((depth[3] - 0.8).abs() < 0.001);
+        }
+    }
+}
 
 /// Configuration passed to the Bevy app
 #[derive(Resource, Clone)]
