@@ -1,3 +1,6 @@
 /target
 *.png
 assets/
+
+# Pre-rendered fixtures (generate locally with: cargo run --bin prerender)
+test_fixtures/
