@@ -1,6 +1,6 @@
 [package]
 name = "bevy-sensor"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Bevy library for capturing multi-view images of 3D OBJ models (YCB dataset) for sensor simulation"
 license = "MIT"
