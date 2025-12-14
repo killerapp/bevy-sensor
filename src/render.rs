@@ -1,11 +1,30 @@
 //! Headless rendering implementation using Bevy.
 //!
-//! This module provides the actual rendering implementation for capturing
-//! RGBA and depth data from YCB objects without displaying a window.
+//! This module provides rendering for capturing RGBA images from YCB objects.
+//! A window is briefly opened to render the scene, then `ScreenshotManager`
+//! captures the frame before the window closes.
 //!
-//! NOTE: True headless rendering (without any display) is complex in Bevy.
-//! This implementation opens a small window, renders, and extracts pixels.
+//! # Current Status
+//!
+//! - **RGBA**: Working via `ScreenshotManager.take_screenshot()` callback
+//! - **Depth**: Placeholder only (uniform camera distance per pixel)
+//!
+//! # Running Requirements
+//!
+//! On WSL2 or systems without hardware GPU rendering:
+//! ```bash
+//! WGPU_BACKEND=vulkan DISPLAY=:0 cargo run --example test_render
+//! ```
+//!
 //! For CI/headless servers, use Xvfb or software rendering (llvmpipe).
+//!
+//! # Architecture Notes
+//!
+//! Bevy's `App::run()` does not return cleanly in all configurations. This
+//! implementation uses a watchdog thread that monitors for completion and
+//! calls `std::process::exit(0)` once the render output is serialized to
+//! a temp file. The main thread reads this file after the process would
+//! normally exit.
 
 use bevy::asset::LoadState;
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
@@ -596,8 +615,19 @@ fn check_screenshot_ready(
             state.image_width = *width;
             state.image_height = *height;
 
-            // Generate depth data (placeholder - depth buffer extraction is separate)
-            // For now, use camera distance as uniform depth
+            // DEPTH BUFFER LIMITATION:
+            // Bevy 0.11's ScreenshotManager only captures the color buffer.
+            // True depth buffer extraction requires custom render graph nodes
+            // to copy from ViewPrepassTextures::depth to a CPU-readable staging buffer.
+            //
+            // For now, use camera distance as a uniform placeholder. This means:
+            // - Point cloud reconstruction will place all pixels at the same depth
+            // - TBP algorithms expecting per-pixel depth will need this fixed
+            //
+            // TODO: Implement proper depth extraction via:
+            // 1. Custom render node that reads DepthPrepass output
+            // 2. GPU-to-CPU texture copy with staging buffer
+            // 3. Or render depth-to-color shader and capture that
             let camera_dist = request.camera_transform.translation.length();
             let pixel_count = (*width * *height) as usize;
             state.depth_data = Some(vec![camera_dist; pixel_count]);
