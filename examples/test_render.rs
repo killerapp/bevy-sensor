@@ -47,5 +47,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         output.rgba.chunks(4).map(|c| (c[0], c[1], c[2])).collect();
     println!("Unique colors in image: {}", unique_colors.len());
 
+    // Check depth variation (should not be uniform if real depth readback works)
+    let unique_depths: std::collections::HashSet<u32> =
+        output.depth.iter().map(|d| d.to_bits()).collect();
+    let depth_min = output.depth.iter().cloned().reduce(f32::min);
+    let depth_max = output.depth.iter().cloned().reduce(f32::max);
+    println!(
+        "Unique depth values: {} (range: {:?} to {:?})",
+        unique_depths.len(),
+        depth_min,
+        depth_max
+    );
+
+    // Verify we got real depth (not uniform placeholder)
+    if unique_depths.len() > 10 {
+        println!("✓ Depth buffer has varying values - real GPU readback working!");
+    } else {
+        println!("⚠ Depth buffer appears uniform - may be placeholder values");
+    }
+
     Ok(())
 }

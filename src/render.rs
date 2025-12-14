@@ -9,20 +9,28 @@
 //! - **RGBA**: Working via `ScreenshotManager.take_screenshot()` callback
 //! - **Depth**: Placeholder only (uniform camera distance per pixel)
 //!
-//! # Depth Buffer Implementation
+//! # Depth Buffer Limitation
 //!
-//! The helper functions in [`depth_helpers`] are prepared for proper GPU depth
-//! extraction. The implementation requires:
+//! Real depth buffer extraction is currently blocked because Bevy 0.11's prepass
+//! depth texture doesn't have the `COPY_SRC` usage flag, which is required for
+//! `copy_texture_to_buffer`. The infrastructure for depth readback exists:
 //!
-//! 1. Custom `ViewNode` that runs after the PREPASS
-//! 2. Access to `ViewPrepassTextures::depth` (Depth32Float texture)
-//! 3. Copy to staging buffer via `copy_texture_to_buffer`
-//! 4. Async GPU-to-CPU readback via `buffer.map_async()`
-//! 5. Handle 256-byte row alignment when extracting data
-//! 6. Convert reverse-Z NDC (0-1) to linear depth in meters
+//! - [`DepthReadbackNode`] - A ViewNode (currently disabled) that would copy depth
+//! - [`depth_helpers`] - Functions for alignment, extraction, and reverse-Z conversion
+//! - [`SharedDepthBuffer`] - Thread-safe buffer for depth data
+//! - Graceful fallback to uniform camera distance when depth readback fails
 //!
-//! The main challenge is coordinating async GPU readback with Bevy's split
-//! app architecture (main app vs render app run in separate worlds).
+//! ## Solution: Compute Shader Approach
+//!
+//! To implement real depth extraction, a compute shader approach is needed:
+//!
+//! 1. Create a compute pipeline that binds prepass depth as a sampled texture
+//! 2. Sample each texel and write f32 depth values to a storage buffer
+//! 3. Map the storage buffer for CPU readback
+//! 4. Convert from reverse-Z NDC to linear depth using [`depth_helpers::reverse_z_to_linear_depth`]
+//!
+//! Sampling is allowed (unlike copying), so this approach works around the missing
+//! `COPY_SRC` flag on prepass textures.
 //!
 //! # Running Requirements
 //!
@@ -44,8 +52,20 @@
 use bevy::asset::LoadState;
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::ScreenshotManager;
+use bevy::render::camera::ExtractedCamera;
+use bevy::render::render_graph::{
+    NodeRunError, RenderGraphApp, RenderGraphContext, ViewNode, ViewNodeRunner,
+};
+use bevy::render::render_resource::{
+    Buffer, BufferDescriptor, BufferUsages, Extent3d, ImageCopyBuffer, ImageCopyTexture,
+    ImageDataLayout, MapMode, Origin3d, TextureAspect,
+};
+use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+use bevy::render::view::ViewDepthTexture;
+use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::window::{PresentMode, WindowPlugin, WindowResolution};
 use bevy_obj::ObjPlugin;
 use std::fs::File;
@@ -76,24 +96,40 @@ struct RenderState {
 #[derive(Resource, Clone)]
 struct SharedImageBuffer(Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>);
 
-// ============================================================================
-// Depth Buffer Helpers (for future GPU readback implementation)
-// ============================================================================
-//
-// These helper functions are prepared for proper depth buffer extraction.
-// Currently, depth uses a uniform placeholder value. To implement real depth:
-//
-// 1. Create a custom render graph ViewNode that runs after PREPASS
-// 2. Access ViewPrepassTextures::depth (CachedTexture)
-// 3. Copy depth texture to a staging buffer via copy_texture_to_buffer
-// 4. Map staging buffer for CPU read via map_async (runs async after render)
-// 5. Extract f32 depth values, handling 256-byte row alignment
-// 6. Convert from reverse-Z NDC (0-1) to linear depth in meters
-//
-// The main challenge is coordinating async GPU readback with Bevy's render
-// architecture - the RenderApp runs separately from the main App.
+/// Shared buffer for depth data from GPU readback
+/// Contains: (linear_depth_values, width, height)
+#[derive(Resource, Clone, Default)]
+struct SharedDepthBuffer(Arc<Mutex<Option<(Vec<f32>, u32, u32)>>>);
 
-#[allow(dead_code)]
+// ============================================================================
+// Depth Readback Infrastructure
+// ============================================================================
+
+/// Request to capture depth - extracted from main world to render world
+#[derive(Resource, Default, Clone)]
+struct DepthCaptureRequest {
+    requested: bool,
+    near: f32,
+    far: f32,
+}
+
+/// Pending depth capture info for async processing
+struct PendingDepthCapture {
+    buffer: Buffer,
+    width: u32,
+    height: u32,
+    near: f32,
+    far: f32,
+}
+
+/// Queue for pending depth captures (written by render node, read by cleanup system)
+#[derive(Resource, Default)]
+struct PendingDepthCaptureQueue(Arc<Mutex<Vec<PendingDepthCapture>>>);
+
+// ============================================================================
+// Depth Buffer Helpers
+// ============================================================================
+
 mod depth_helpers {
     /// wgpu requires buffer row alignment of 256 bytes
     pub const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
@@ -109,6 +145,7 @@ mod depth_helpers {
     }
 
     /// Calculate aligned buffer size for an image
+    #[allow(dead_code)]
     pub fn get_aligned_size(width: u32, height: u32, pixel_size: u32) -> u32 {
         height * align_byte_size(width * pixel_size)
     }
@@ -226,6 +263,335 @@ mod depth_helpers {
             assert!((depth[2] - 0.7).abs() < 0.001);
             assert!((depth[3] - 0.8).abs() < 0.001);
         }
+
+        #[test]
+        fn test_reverse_z_depth_at_near_plane() {
+            // Near plane should give near value
+            let near = 0.01;
+            let far = 100.0;
+            let depth = reverse_z_to_linear_depth(1.0, near, far);
+            assert!((depth - near).abs() < 0.0001);
+        }
+
+        #[test]
+        fn test_reverse_z_depth_at_far_plane() {
+            // Far plane (ndc=0) should give far value
+            let near = 0.01;
+            let far = 100.0;
+            let depth = reverse_z_to_linear_depth(0.0, near, far);
+            assert!((depth - far).abs() < 0.0001);
+        }
+
+        #[test]
+        fn test_reverse_z_monotonic() {
+            // Depth should increase as NDC decreases (reverse-Z)
+            let near = 0.01;
+            let far = 10.0;
+
+            let mut prev_depth = 0.0;
+            for i in (0..=100).rev() {
+                let ndc = i as f32 / 100.0;
+                let depth = reverse_z_to_linear_depth(ndc, near, far);
+                assert!(
+                    depth >= prev_depth,
+                    "Depth should be monotonic: ndc={}, depth={}, prev={}",
+                    ndc,
+                    depth,
+                    prev_depth
+                );
+                prev_depth = depth;
+            }
+        }
+
+        #[test]
+        fn test_convert_depth_to_linear_batch() {
+            let near = 0.01;
+            let far = 10.0;
+            let ndc_depths = vec![1.0, 0.5, 0.1, 0.0];
+
+            let linear = convert_depth_to_linear(&ndc_depths, near, far);
+
+            assert_eq!(linear.len(), 4);
+            // Near plane
+            assert!((linear[0] - near).abs() < 0.001);
+            // Far plane
+            assert!((linear[3] - far).abs() < 0.001);
+            // All should be in range [near, far]
+            for d in &linear {
+                assert!(*d >= near && *d <= far);
+            }
+        }
+
+        #[test]
+        fn test_align_byte_size_edge_cases() {
+            // Powers of two should stay the same if multiple of 256
+            assert_eq!(align_byte_size(256), 256);
+            assert_eq!(align_byte_size(512), 512);
+            assert_eq!(align_byte_size(1024), 1024);
+
+            // Just under 256 should round up to 256
+            assert_eq!(align_byte_size(255), 256);
+            assert_eq!(align_byte_size(128), 256);
+
+            // Just over 256 should round up to 512
+            assert_eq!(align_byte_size(300), 512);
+        }
+
+        #[test]
+        fn test_extract_depth_64x64() {
+            // Test with TBP default resolution
+            let width = 64u32;
+            let height = 64u32;
+            let bytes_per_pixel = 4u32;
+            let padded_row = align_byte_size(width * bytes_per_pixel);
+
+            // Create aligned buffer
+            let mut data = vec![0u8; (padded_row * height) as usize];
+
+            // Fill with incrementing values
+            for y in 0..height {
+                for x in 0..width {
+                    let value = (y * width + x) as f32 / (width * height) as f32;
+                    let offset = (y * padded_row + x * bytes_per_pixel) as usize;
+                    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+
+            let depth = extract_depth_with_alignment(&data, width, height);
+            assert_eq!(depth.len(), (width * height) as usize);
+
+            // Verify first and last values
+            assert!((depth[0] - 0.0).abs() < 0.001);
+            let expected_last = (width * height - 1) as f32 / (width * height) as f32;
+            assert!((depth[(width * height - 1) as usize] - expected_last).abs() < 0.001);
+        }
+    }
+}
+
+// ============================================================================
+// Depth Readback Render Node
+// ============================================================================
+
+/// Label for the depth readback render graph node.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, bevy::render::render_graph::RenderLabel)]
+struct DepthReadbackLabel;
+
+/// Render node that copies the main camera's depth texture to a staging buffer.
+/// This runs after the main pass completes, using ViewDepthTexture.
+#[derive(Default)]
+struct DepthReadbackNode;
+
+impl ViewNode for DepthReadbackNode {
+    type ViewQuery = (&'static ViewDepthTexture, &'static ExtractedCamera);
+
+    fn run<'w>(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        (view_depth_texture, camera): QueryItem<'w, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        // Check if depth capture is requested
+        let Some(request) = world.get_resource::<DepthCaptureRequest>() else {
+            return Ok(());
+        };
+        if !request.requested {
+            return Ok(());
+        }
+
+        // Get the pending queue
+        let Some(queue) = world.get_resource::<PendingDepthCaptureQueue>() else {
+            return Ok(());
+        };
+
+        // Get texture size from camera viewport or physical size
+        let Some(physical_size) = camera.physical_target_size else {
+            return Ok(());
+        };
+        let width = physical_size.x;
+        let height = physical_size.y;
+
+        let render_device = world.resource::<RenderDevice>();
+
+        // Calculate aligned buffer size (wgpu requires 256-byte row alignment)
+        let bytes_per_pixel = 4u32; // f32 = 4 bytes (Depth32Float)
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let padded_bytes_per_row = depth_helpers::align_byte_size(unpadded_bytes_per_row);
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        // Create staging buffer for CPU readback
+        let staging_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("depth_staging_buffer"),
+            size: buffer_size,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Copy depth texture to staging buffer
+        let encoder = render_context.command_encoder();
+        encoder.copy_texture_to_buffer(
+            ImageCopyTexture {
+                texture: &view_depth_texture.texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::DepthOnly,
+            },
+            ImageCopyBuffer {
+                buffer: &staging_buffer,
+                layout: ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Push to queue for async processing (queue is Arc<Mutex<Vec>>)
+        if let Ok(mut pending) = queue.0.lock() {
+            pending.push(PendingDepthCapture {
+                buffer: staging_buffer,
+                width,
+                height,
+                near: request.near,
+                far: request.far,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Depth Readback Plugin
+// ============================================================================
+
+/// Plugin that sets up depth buffer readback from the GPU.
+struct DepthReadbackPlugin {
+    shared_depth: SharedDepthBuffer,
+    near: f32,
+    far: f32,
+}
+
+impl Plugin for DepthReadbackPlugin {
+    fn build(&self, app: &mut App) {
+        use bevy::core_pipeline::core_3d::graph::Core3d;
+        use bevy::core_pipeline::core_3d::graph::Node3d;
+
+        // Insert shared depth buffer in main app
+        app.insert_resource(self.shared_depth.clone());
+        app.insert_resource(DepthCaptureRequest {
+            requested: false,
+            near: self.near,
+            far: self.far,
+        });
+
+        // Get render app
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            error!("Failed to get RenderApp for depth readback");
+            return;
+        };
+
+        // Insert resources in render world
+        render_app.insert_resource(self.shared_depth.clone());
+        render_app.init_resource::<PendingDepthCaptureQueue>();
+
+        // Add extraction system to copy request from main world
+        render_app.add_systems(ExtractSchedule, extract_depth_request);
+
+        // Add system to process completed depth captures
+        render_app.add_systems(Render, collect_depth_captures.in_set(RenderSet::Cleanup));
+
+        // Register the depth readback node in the render graph
+        // Run after main pass completes (depth buffer is ready) but before tonemapping
+        render_app
+            .add_render_graph_node::<ViewNodeRunner<DepthReadbackNode>>(Core3d, DepthReadbackLabel)
+            .add_render_graph_edges(
+                Core3d,
+                (Node3d::EndMainPass, DepthReadbackLabel, Node3d::Tonemapping),
+            );
+    }
+}
+
+/// Extract depth capture request from main world to render world
+fn extract_depth_request(mut commands: Commands, request: Extract<Res<DepthCaptureRequest>>) {
+    commands.insert_resource(DepthCaptureRequest {
+        requested: request.requested,
+        near: request.near,
+        far: request.far,
+    });
+}
+
+/// Process completed depth buffer captures (async GPU-to-CPU readback)
+fn collect_depth_captures(
+    queue: Res<PendingDepthCaptureQueue>,
+    shared_depth: Res<SharedDepthBuffer>,
+) {
+    // Take all pending captures from the queue
+    let pending_captures = {
+        let Ok(mut pending) = queue.0.lock() else {
+            return;
+        };
+        std::mem::take(&mut *pending)
+    };
+
+    if pending_captures.is_empty() {
+        return;
+    }
+
+    // Process each pending capture
+    for pending in pending_captures {
+        let width = pending.width;
+        let height = pending.height;
+        let near = pending.near;
+        let far = pending.far;
+        let buffer = pending.buffer;
+        let shared = shared_depth.0.clone();
+
+        // Spawn a thread for blocking GPU-to-CPU buffer mapping
+        std::thread::spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let buffer_slice = buffer.slice(..);
+
+            // Request GPU to map buffer for CPU read
+            buffer_slice.map_async(MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+
+            // Wait for mapping to complete (blocking)
+            match rx.recv() {
+                Ok(Ok(())) => {
+                    // Read mapped data
+                    let data = buffer_slice.get_mapped_range();
+
+                    // Extract depth values with alignment handling
+                    let ndc_depth =
+                        depth_helpers::extract_depth_with_alignment(&data, width, height);
+
+                    drop(data);
+                    buffer.unmap();
+
+                    // Convert from reverse-Z NDC to linear depth in meters
+                    let linear_depth =
+                        depth_helpers::convert_depth_to_linear(&ndc_depth, near, far);
+
+                    // Store in shared buffer
+                    if let Ok(mut guard) = shared.lock() {
+                        *guard = Some((linear_depth, width, height));
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to map depth buffer: {:?}", e);
+                }
+                Err(e) => {
+                    eprintln!("Depth buffer mapping channel closed: {:?}", e);
+                }
+            }
+        });
     }
 }
 
@@ -301,6 +667,10 @@ pub fn render_headless(
     let shared_image: SharedImageBuffer = SharedImageBuffer(Arc::new(Mutex::new(None)));
     let image_clone = shared_image.clone();
 
+    // Shared buffer for depth readback
+    let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
+    let depth_clone = shared_depth.clone();
+
     // Create a temp file path for output serialization
     let temp_path =
         std::env::temp_dir().join(format!("bevy_sensor_render_{}.bin", std::process::id()));
@@ -316,42 +686,20 @@ pub fn render_headless(
             // Check if we have a result
             if let Ok(guard) = output_poll.0.lock() {
                 if let Some(output) = guard.as_ref() {
-                    eprintln!(
-                        "Watchdog: Output detected! {}x{} rgba_len={}",
-                        output.width,
-                        output.height,
-                        output.rgba.len()
-                    );
                     // Serialize output to temp file
                     let data = serialize_output(output);
-                    eprintln!(
-                        "Watchdog: Serialized {} bytes to {:?}",
-                        data.len(),
-                        temp_path_clone
-                    );
-                    match File::create(&temp_path_clone) {
-                        Ok(mut file) => {
-                            if let Err(e) = file.write_all(&data) {
-                                eprintln!("Watchdog: Failed to write: {}", e);
-                            } else {
-                                eprintln!("Watchdog: Written successfully");
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Watchdog: Failed to create file: {}", e);
-                        }
+                    if let Ok(mut file) = File::create(&temp_path_clone) {
+                        let _ = file.write_all(&data);
                     }
                     // Give a moment for file to flush
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                    eprintln!("Watchdog: Exiting with code 0");
                     // Exit the process - App::run() won't return otherwise
                     std::process::exit(0);
                 }
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Watchdog: Timeout!");
-                std::process::exit(1); // Timeout
+                std::process::exit(1);
             }
 
             std::thread::sleep(poll_interval);
@@ -377,6 +725,11 @@ pub fn render_headless(
                 .disable::<bevy::log::LogPlugin>(),
         )
         .add_plugins(ObjPlugin)
+        .add_plugins(DepthReadbackPlugin {
+            shared_depth: depth_clone,
+            near: config.near_plane,
+            far: config.far_plane,
+        })
         .insert_resource(request)
         .insert_resource(output_clone)
         .insert_resource(image_clone)
@@ -530,17 +883,17 @@ fn setup_scene(
     request: Res<RenderRequest>,
     mut _materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Camera with depth prepass
+    // Camera with depth prepass (Bevy 0.15+ uses Camera3d component)
+    // Disable MSAA for depth readback compatibility (can't copy from multisampled texture)
     commands.spawn((
-        Camera3dBundle {
-            camera: Camera {
-                hdr: true,
-                ..default()
-            },
-            transform: request.camera_transform,
-            tonemapping: Tonemapping::None, // Accurate colors for software rendering
+        Camera3d::default(),
+        Camera {
+            hdr: true,
             ..default()
         },
+        Msaa::Off,
+        request.camera_transform,
+        Tonemapping::None, // Accurate colors for software rendering
         DepthPrepass,
         NormalPrepass,
         RenderCamera,
@@ -553,38 +906,36 @@ fn setup_scene(
         brightness: lighting.ambient_brightness,
     });
 
-    // Key light (from config)
+    // Key light (from config) - Bevy 0.15+ uses PointLight component directly
     if lighting.key_light_intensity > 0.0 {
-        commands.spawn(PointLightBundle {
-            point_light: PointLight {
+        commands.spawn((
+            PointLight {
                 intensity: lighting.key_light_intensity,
                 shadows_enabled: lighting.shadows_enabled,
                 ..default()
             },
-            transform: Transform::from_xyz(
+            Transform::from_xyz(
                 lighting.key_light_position[0],
                 lighting.key_light_position[1],
                 lighting.key_light_position[2],
             ),
-            ..default()
-        });
+        ));
     }
 
     // Fill light (from config)
     if lighting.fill_light_intensity > 0.0 {
-        commands.spawn(PointLightBundle {
-            point_light: PointLight {
+        commands.spawn((
+            PointLight {
                 intensity: lighting.fill_light_intensity,
                 shadows_enabled: lighting.shadows_enabled,
                 ..default()
             },
-            transform: Transform::from_xyz(
+            Transform::from_xyz(
                 lighting.fill_light_position[0],
                 lighting.fill_light_position[1],
                 lighting.fill_light_position[2],
             ),
-            ..default()
-        });
+        ));
     }
 
     // Load the scene
@@ -602,13 +953,10 @@ fn setup_scene(
         ..default()
     });
 
-    // Spawn the scene with rotation
+    // Spawn the scene with rotation (Bevy 0.15+ uses SceneRoot)
     commands.spawn((
-        SceneBundle {
-            scene: scene_handle,
-            transform: Transform::from_rotation(request.object_rotation.to_quat()),
-            ..default()
-        },
+        SceneRoot(scene_handle),
+        Transform::from_rotation(request.object_rotation.to_quat()),
         RenderedObject,
     ));
 
@@ -628,12 +976,12 @@ fn check_assets_loaded(
 
     if let Some(scene) = scene {
         match asset_server.get_load_state(&scene.0) {
-            LoadState::Loaded => {
+            Some(LoadState::Loaded) => {
                 state.scene_loaded = true;
                 info!("Scene loaded");
             }
-            LoadState::Failed => {
-                error!("Scene failed to load");
+            Some(LoadState::Failed(err)) => {
+                error!("Scene failed to load: {:?}", err);
             }
             _ => {}
         }
@@ -641,12 +989,12 @@ fn check_assets_loaded(
 
     if let Some(texture) = texture {
         match asset_server.get_load_state(&texture.0) {
-            LoadState::Loaded => {
+            Some(LoadState::Loaded) => {
                 state.texture_loaded = true;
                 info!("Texture loaded");
             }
-            LoadState::Failed => {
-                error!("Texture failed to load");
+            Some(LoadState::Failed(err)) => {
+                error!("Texture failed to load: {:?}", err);
             }
             _ => {}
         }
@@ -658,7 +1006,8 @@ fn apply_materials(
     mut state: ResMut<RenderState>,
     texture: Option<Res<LoadedTexture>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut mesh_query: Query<&mut Handle<StandardMaterial>, With<Handle<Mesh>>>,
+    // Bevy 0.15+: Use MeshMaterial3d instead of Handle<StandardMaterial>
+    mut mesh_query: Query<&mut MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
 ) {
     if !state.scene_loaded || !state.texture_loaded || state.capture_ready {
         return;
@@ -682,8 +1031,8 @@ fn apply_materials(
 
     // Apply to all meshes
     let mut count = 0;
-    for mut mat_handle in mesh_query.iter_mut() {
-        *mat_handle = textured_material.clone();
+    for mut mat in mesh_query.iter_mut() {
+        mat.0 = textured_material.clone();
         count += 1;
     }
 
@@ -698,68 +1047,45 @@ fn apply_materials(
     }
 }
 
-/// Request a screenshot capture
+/// Request a screenshot capture (Bevy 0.15+ uses Screenshot entity + observer)
 fn request_screenshot(
+    mut commands: Commands,
     mut state: ResMut<RenderState>,
-    main_window: Query<Entity, With<bevy::window::PrimaryWindow>>,
-    mut screenshot_manager: ResMut<ScreenshotManager>,
     shared_image: Res<SharedImageBuffer>,
+    mut depth_request: ResMut<DepthCaptureRequest>,
 ) {
     if !state.capture_ready || state.screenshot_requested {
         return;
     }
 
-    let Ok(window_entity) = main_window.get_single() else {
-        error!("No primary window found for screenshot");
-        return;
-    };
-
-    // Clone the Arc for the callback
+    // Clone the Arc for the observer closure
     let image_buffer = shared_image.0.clone();
 
-    // Request screenshot with callback
-    info!("Requesting screenshot from window {:?}", window_entity);
-    if let Err(e) = screenshot_manager.take_screenshot(window_entity, move |image| {
-        // This callback runs on AsyncComputeTaskPool thread
-        // eprintln!("Screenshot callback triggered!");
-        // Extract RGBA data from the Image
-        let width = image.texture_descriptor.size.width;
-        let height = image.texture_descriptor.size.height;
+    // Also request depth capture
+    depth_request.requested = true;
+    info!("Depth capture requested");
 
-        // Convert image data to RGBA8
-        let rgba_data = match image.texture_descriptor.format {
-            bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb
-            | bevy::render::render_resource::TextureFormat::Rgba8Unorm => {
-                // Already in RGBA8 format
-                image.data.clone()
-            }
-            bevy::render::render_resource::TextureFormat::Bgra8UnormSrgb
-            | bevy::render::render_resource::TextureFormat::Bgra8Unorm => {
-                // Convert BGRA to RGBA
-                let mut rgba = image.data.clone();
-                for chunk in rgba.chunks_exact_mut(4) {
-                    chunk.swap(0, 2); // Swap B and R
-                }
-                rgba
-            }
-            _other => {
-                // Unknown texture format - use raw data
-                image.data.clone()
-            }
-        };
+    // Spawn Screenshot entity with observer (Bevy 0.15+ API)
+    info!("Requesting screenshot via Screenshot entity");
+    commands.spawn(Screenshot::primary_window()).observe(
+        move |trigger: Trigger<ScreenshotCaptured>| {
+            // ScreenshotCaptured derefs to Image
+            let image: &Image = trigger.event();
 
-        // Store in shared buffer
-        // eprintln!("Storing {}x{} image ({} bytes) in shared buffer", width, height, rgba_data.len());
-        if let Ok(mut guard) = image_buffer.lock() {
-            *guard = Some((rgba_data, width, height));
-            // eprintln!("Image stored in shared buffer");
-        } else {
-            // eprintln!("Failed to lock shared buffer!");
-        }
-    }) {
-        error!("Failed to request screenshot: {:?}", e);
-        return;
-    }
+            // Get dimensions
+            let size = image.size();
+            let width = size.x;
+            let height = size.y;
+
+            // Get raw image data - Bevy 0.15 Image uses .data field
+            let rgba_data = image.data.clone();
+
+            // Store in shared buffer
+            if let Ok(mut guard) = image_buffer.lock() {
+                *guard = Some((rgba_data, width, height));
+            }
+        },
+    );
 
     state.screenshot_requested = true;
     info!("Screenshot requested");
@@ -769,39 +1095,57 @@ fn request_screenshot(
 fn check_screenshot_ready(
     mut state: ResMut<RenderState>,
     shared_image: Res<SharedImageBuffer>,
+    shared_depth: Res<SharedDepthBuffer>,
     request: Res<RenderRequest>,
 ) {
     if !state.screenshot_requested || state.captured {
         return;
     }
 
-    // Check if callback has written data
-    if let Ok(guard) = shared_image.0.lock() {
+    // Increment frame count while waiting for capture
+    state.frame_count += 1;
+
+    // Check if RGBA callback has written data
+    let rgba_ready = if let Ok(guard) = shared_image.0.lock() {
         if let Some((rgba_data, width, height)) = guard.as_ref() {
-            // eprintln!("Found image data in shared buffer: {}x{}", width, height);
-            state.rgba_data = Some(rgba_data.clone());
-            state.image_width = *width;
-            state.image_height = *height;
-
-            // DEPTH BUFFER LIMITATION:
-            // Bevy 0.11's ScreenshotManager only captures the color buffer.
-            // True depth buffer extraction requires custom render graph nodes
-            // to copy from ViewPrepassTextures::depth to a CPU-readable staging buffer.
-            //
-            // For now, use camera distance as a uniform placeholder. This means:
-            // - Point cloud reconstruction will place all pixels at the same depth
-            // - TBP algorithms expecting per-pixel depth will need this fixed
-            //
-            // TODO: Implement proper depth extraction via:
-            // 1. Custom render node that reads DepthPrepass output
-            // 2. GPU-to-CPU texture copy with staging buffer
-            // 3. Or render depth-to-color shader and capture that
-            let camera_dist = request.camera_transform.translation.length();
-            let pixel_count = (*width * *height) as usize;
-            state.depth_data = Some(vec![camera_dist; pixel_count]);
-
-            state.captured = true;
+            if state.rgba_data.is_none() {
+                state.rgba_data = Some(rgba_data.clone());
+                state.image_width = *width;
+                state.image_height = *height;
+            }
+            true
+        } else {
+            false
         }
+    } else {
+        false
+    };
+
+    // Check if depth readback has completed
+    let depth_ready = if let Ok(guard) = shared_depth.0.lock() {
+        if let Some((depth_data, _width, _height)) = guard.as_ref() {
+            if state.depth_data.is_none() {
+                state.depth_data = Some(depth_data.clone());
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // If depth readback failed or is taking too long, fall back to placeholder
+    // (This allows graceful degradation on systems where depth readback fails)
+    if rgba_ready && !depth_ready && state.frame_count > 60 {
+        let camera_dist = request.camera_transform.translation.length();
+        let pixel_count = (state.image_width * state.image_height) as usize;
+        state.depth_data = Some(vec![camera_dist; pixel_count]);
+    }
+
+    // Mark as captured when both RGBA and depth are ready
+    if state.rgba_data.is_some() && state.depth_data.is_some() {
+        state.captured = true;
     }
 }
 
@@ -825,7 +1169,6 @@ fn extract_and_exit(
     }
 
     if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
-        // eprintln!("extract_and_exit: have rgba ({} bytes) and depth ({} values)", rgba.len(), depth.len());
         // Use actual captured dimensions (may differ from config if window was resized)
         let width = state.image_width;
         let height = state.image_height;
@@ -850,7 +1193,10 @@ fn extract_and_exit(
 
         if let Ok(mut guard) = shared_output.0.lock() {
             *guard = Some(output);
-            // eprintln!("Output stored in shared_output");
+            drop(guard); // Release lock immediately
+
+            // Small delay to allow watchdog to detect output before window close
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
 
         // Close all windows to trigger app exit

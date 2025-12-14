@@ -3,8 +3,7 @@
 use bevy::asset::LoadState;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::ScreenshotManager;
-use bevy::window::PrimaryWindow;
+use bevy::render::view::screenshot::Screenshot;
 use bevy_obj::ObjPlugin;
 use std::f32::consts::PI;
 
@@ -120,22 +119,25 @@ fn setup(
 ) {
     // Camera - spawned with initial transform, will be moved by system
     // Disable tonemapping for software rendering compatibility
-    commands.spawn((Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
-        tonemapping: Tonemapping::None,
-        ..default()
-    },));
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            hdr: true,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
+        Tonemapping::None,
+    ));
 
     // Light
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
+    commands.spawn((
+        PointLight {
             intensity: 1500.0,
             shadows_enabled: false,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
-        ..default()
-    });
+        Transform::from_xyz(4.0, 8.0, 4.0),
+    ));
 
     // Ambient light
     commands.insert_resource(AmbientLight {
@@ -164,11 +166,10 @@ fn setup(
     commands.insert_resource(TexturedMaterial(textured_material));
     commands.insert_resource(MaterialsReplaced::default());
 
-    commands.spawn(SceneBundle {
-        scene: scene_handle,
-        transform: Transform::from_scale(Vec3::splat(1.0)),
-        ..default()
-    });
+    commands.spawn((
+        SceneRoot(scene_handle),
+        Transform::from_scale(Vec3::splat(1.0)),
+    ));
 }
 
 /// Replace all materials in the scene with our manually-loaded textured material
@@ -178,9 +179,9 @@ fn replace_materials(
     textured_mat: Option<Res<TexturedMaterial>>,
     texture_handle: Option<Res<TextureHandle>>,
     asset_server: Res<AssetServer>,
-    mut mesh_query: Query<(Entity, &mut Handle<StandardMaterial>), With<Handle<Mesh>>>,
+    mut mesh_query: Query<(Entity, &mut MeshMaterial3d<StandardMaterial>), With<Mesh3d>>,
     all_entities: Query<Entity>,
-    mesh_entities: Query<Entity, With<Handle<Mesh>>>,
+    mesh_entities: Query<Entity, With<Mesh3d>>,
     state: Res<CaptureState>,
 ) {
     // Wait for texture to be loaded
@@ -188,7 +189,7 @@ fn replace_materials(
         return;
     };
     let load_state = asset_server.get_load_state(&tex_handle.0);
-    if load_state != LoadState::Loaded {
+    if !matches!(load_state, Some(LoadState::Loaded)) {
         return;
     }
 
@@ -215,9 +216,9 @@ fn replace_materials(
     // Replace all materials
     let mut count = 0;
     for (entity, mut material_handle) in mesh_query.iter_mut() {
-        if *material_handle != mat.0 {
+        if material_handle.0 != mat.0 {
             println!("Replacing material on entity {:?}", entity);
-            *material_handle = mat.0.clone();
+            material_handle.0 = mat.0.clone();
             count += 1;
         }
     }
@@ -228,11 +229,10 @@ fn replace_materials(
 }
 
 fn capture_sequence(
+    mut commands: Commands,
     mut state: ResMut<CaptureState>,
     viewpoints: Res<Viewpoints>,
     mut camera_query: Query<&mut Transform, With<Camera3d>>,
-    main_window: Query<Entity, With<PrimaryWindow>>,
-    mut screenshot_manager: ResMut<ScreenshotManager>,
     asset_server: Res<AssetServer>,
     texture_handle: Option<Res<TextureHandle>>,
 ) {
@@ -251,9 +251,8 @@ fn capture_sequence(
                 }
 
                 match load_state {
-                    LoadState::Loaded => {
-                        let path = asset_server.get_handle_path(&handle.0);
-                        println!("Texture loaded. Path: {:?}", path);
+                    Some(LoadState::Loaded) => {
+                        println!("Texture loaded.");
 
                         // Add extra wait for dependent assets after texture is loaded
                         // Wait 60 frames for render pipeline to process materials
@@ -267,7 +266,7 @@ fn capture_sequence(
                             state.step = CaptureStep::SetupView;
                         }
                     }
-                    LoadState::Failed => {
+                    Some(LoadState::Failed(_)) => {
                         println!("ERROR: Texture failed to load!");
                         std::process::exit(1);
                     }
@@ -315,14 +314,13 @@ fn capture_sequence(
         }
         CaptureStep::Capture => {
             let path = format!("capture_{}.png", state.view_index);
-            if let Ok(window_entity) = main_window.get_single() {
-                screenshot_manager
-                    .save_screenshot_to_disk(window_entity, &path)
-                    .unwrap();
-                println!("Requested screenshot save to {}", path);
-                state.frame_counter = 0;
-                state.step = CaptureStep::WaitSave;
-            }
+            // Use Bevy 0.15+ Screenshot entity + save_to_disk observer
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(bevy::render::view::screenshot::save_to_disk(path.clone()));
+            println!("Requested screenshot save to {}", path);
+            state.frame_counter = 0;
+            state.step = CaptureStep::WaitSave;
         }
         CaptureStep::WaitSave => {
             state.frame_counter += 1;

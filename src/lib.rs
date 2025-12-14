@@ -54,9 +54,12 @@ use bevy::prelude::*;
 use std::f32::consts::PI;
 use std::path::Path;
 
-// Headless rendering implementation (currently returns placeholder data)
+// Headless rendering implementation
 // Full GPU rendering requires a display - see render module for details
 mod render;
+
+// Test fixtures for pre-rendered images (CI/CD support)
+pub mod fixtures;
 
 // Re-export ycbust types for convenience
 pub use ycbust::{self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TEN_OBJECTS};
@@ -1053,5 +1056,241 @@ mod tests {
         let err = RenderError::MeshNotFound("/path/to/mesh.obj".to_string());
         assert!(err.to_string().contains("Mesh not found"));
         assert!(err.to_string().contains("/path/to/mesh.obj"));
+    }
+
+    // =========================================================================
+    // Edge Case Tests
+    // =========================================================================
+
+    #[test]
+    fn test_object_rotation_extreme_angles() {
+        // Test angles beyond 360 degrees
+        let rot = ObjectRotation::new(450.0, -720.0, 1080.0);
+        let quat = rot.to_quat();
+        // Quaternion should still be valid (normalized)
+        assert!((quat.length() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_object_rotation_to_transform() {
+        let rot = ObjectRotation::new(45.0, 90.0, 0.0);
+        let transform = rot.to_transform();
+        // Transform should have no translation
+        assert_eq!(transform.translation, Vec3::ZERO);
+        // Should have rotation
+        assert!(transform.rotation != Quat::IDENTITY);
+    }
+
+    #[test]
+    fn test_viewpoint_config_single_viewpoint() {
+        let config = ViewpointConfig {
+            radius: 1.0,
+            yaw_count: 1,
+            pitch_angles_deg: vec![0.0],
+        };
+        assert_eq!(config.viewpoint_count(), 1);
+        let viewpoints = generate_viewpoints(&config);
+        assert_eq!(viewpoints.len(), 1);
+        // Single viewpoint at yaw=0, pitch=0 should be at (0, 0, radius)
+        let pos = viewpoints[0].translation;
+        assert!((pos.x).abs() < 0.001);
+        assert!((pos.y).abs() < 0.001);
+        assert!((pos.z - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_viewpoint_radius_scaling() {
+        let config1 = ViewpointConfig {
+            radius: 0.5,
+            yaw_count: 4,
+            pitch_angles_deg: vec![0.0],
+        };
+        let config2 = ViewpointConfig {
+            radius: 2.0,
+            yaw_count: 4,
+            pitch_angles_deg: vec![0.0],
+        };
+
+        let v1 = generate_viewpoints(&config1);
+        let v2 = generate_viewpoints(&config2);
+
+        // Viewpoints should scale proportionally
+        for (vp1, vp2) in v1.iter().zip(v2.iter()) {
+            let ratio = vp2.translation.length() / vp1.translation.length();
+            assert!((ratio - 4.0).abs() < 0.01); // 2.0 / 0.5 = 4.0
+        }
+    }
+
+    #[test]
+    fn test_camera_intrinsics_project_at_z_zero() {
+        let intrinsics = CameraIntrinsics {
+            focal_length: [100.0, 100.0],
+            principal_point: [32.0, 32.0],
+            image_size: [64, 64],
+        };
+
+        // Point at z=0 should return None (division by zero protection)
+        let result = intrinsics.project(Vec3::new(1.0, 1.0, 0.0));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_camera_intrinsics_roundtrip() {
+        let intrinsics = CameraIntrinsics {
+            focal_length: [100.0, 100.0],
+            principal_point: [32.0, 32.0],
+            image_size: [64, 64],
+        };
+
+        // Project a 3D point
+        let original = Vec3::new(0.5, -0.3, 2.0);
+        let projected = intrinsics.project(original).unwrap();
+
+        // Unproject back with the same depth
+        let unprojected = intrinsics.unproject(projected, original.z);
+
+        // Should get back approximately the same point
+        assert!((unprojected.x - original.x).abs() < 0.001);
+        assert!((unprojected.y - original.y).abs() < 0.001);
+        assert!((unprojected.z - original.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_render_output_empty() {
+        let output = RenderOutput {
+            rgba: vec![],
+            depth: vec![],
+            width: 0,
+            height: 0,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+        };
+
+        // Should handle empty gracefully
+        assert_eq!(output.get_rgba(0, 0), None);
+        assert_eq!(output.get_depth(0, 0), None);
+        assert!(output.to_rgb_image().is_empty());
+        assert!(output.to_depth_image().is_empty());
+    }
+
+    #[test]
+    fn test_render_output_1x1() {
+        let output = RenderOutput {
+            rgba: vec![128, 64, 32, 255],
+            depth: vec![0.5],
+            width: 1,
+            height: 1,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+        };
+
+        assert_eq!(output.get_rgba(0, 0), Some([128, 64, 32, 255]));
+        assert_eq!(output.get_depth(0, 0), Some(0.5));
+        assert_eq!(output.get_rgb(0, 0), Some([128, 64, 32]));
+
+        let rgb_img = output.to_rgb_image();
+        assert_eq!(rgb_img.len(), 1);
+        assert_eq!(rgb_img[0].len(), 1);
+        assert_eq!(rgb_img[0][0], [128, 64, 32]);
+    }
+
+    #[test]
+    fn test_render_config_high_res() {
+        let config = RenderConfig::high_res();
+        assert_eq!(config.width, 512);
+        assert_eq!(config.height, 512);
+
+        let intrinsics = config.intrinsics();
+        assert_eq!(intrinsics.image_size, [512, 512]);
+        assert_eq!(intrinsics.principal_point, [256.0, 256.0]);
+    }
+
+    #[test]
+    fn test_render_config_zoom_affects_fov() {
+        let base = RenderConfig::tbp_default();
+        let zoomed = RenderConfig {
+            zoom: 2.0,
+            ..base.clone()
+        };
+
+        // Higher zoom = lower FOV
+        assert!(zoomed.fov_radians() < base.fov_radians());
+        // Specifically, 2x zoom = half FOV
+        assert!((zoomed.fov_radians() - base.fov_radians() / 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_render_config_zoom_affects_intrinsics() {
+        let base = RenderConfig::tbp_default();
+        let zoomed = RenderConfig {
+            zoom: 2.0,
+            ..base.clone()
+        };
+
+        // Higher zoom = higher focal length
+        let base_intrinsics = base.intrinsics();
+        let zoomed_intrinsics = zoomed.intrinsics();
+
+        assert!(zoomed_intrinsics.focal_length[0] > base_intrinsics.focal_length[0]);
+    }
+
+    #[test]
+    fn test_lighting_config_variants() {
+        let default = LightingConfig::default();
+        let bright = LightingConfig::bright();
+        let soft = LightingConfig::soft();
+        let unlit = LightingConfig::unlit();
+
+        // Bright should have higher intensity than default
+        assert!(bright.key_light_intensity > default.key_light_intensity);
+
+        // Unlit should have no point lights
+        assert_eq!(unlit.key_light_intensity, 0.0);
+        assert_eq!(unlit.fill_light_intensity, 0.0);
+        assert_eq!(unlit.ambient_brightness, 1.0);
+
+        // Soft should have lower intensity
+        assert!(soft.key_light_intensity < default.key_light_intensity);
+    }
+
+    #[test]
+    fn test_all_render_error_variants() {
+        let errors = vec![
+            RenderError::MeshNotFound("mesh.obj".to_string()),
+            RenderError::TextureNotFound("texture.png".to_string()),
+            RenderError::RenderFailed("GPU error".to_string()),
+            RenderError::InvalidConfig("bad config".to_string()),
+        ];
+
+        for err in errors {
+            // All variants should have Display impl
+            let msg = err.to_string();
+            assert!(!msg.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_tbp_known_orientations_unique() {
+        let orientations = ObjectRotation::tbp_known_orientations();
+
+        // All 14 orientations should produce unique quaternions
+        let quats: Vec<Quat> = orientations.iter().map(|r| r.to_quat()).collect();
+
+        for (i, q1) in quats.iter().enumerate() {
+            for (j, q2) in quats.iter().enumerate() {
+                if i != j {
+                    // Quaternions should be different (accounting for q == -q equivalence)
+                    let dot = q1.dot(*q2).abs();
+                    assert!(
+                        dot < 0.999,
+                        "Orientations {} and {} produce same quaternion",
+                        i,
+                        j
+                    );
+                }
+            }
+        }
     }
 }

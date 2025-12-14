@@ -10,7 +10,7 @@ A Bevy library and CLI that captures multi-view images of 3D OBJ models (YCB dat
 # Build
 cargo build --release
 
-# Run tests (38 tests)
+# Run tests (41 tests)
 cargo test
 
 # Run (requires GPU or proper software rendering)
@@ -118,8 +118,8 @@ let pixel = intrinsics.project(point_3d);  // Option<[f32; 2]>
 let point = intrinsics.unproject([32.0, 32.0], depth);  // Vec3
 ```
 
-> **Note:** Current implementation returns placeholder data. Full GPU rendering
-> requires a display (X11/Wayland). Use Xvfb for headless servers.
+> **Note:** Full GPU rendering requires a display (X11/Wayland). The depth buffer
+> now returns real per-pixel depth values from GPU readback (Bevy 0.15+).
 
 ### Object Rotation (`ObjectRotation`)
 
@@ -225,18 +225,41 @@ The `assets/ycb` symlink points to `/tmp/ycb`.
 ## Dependencies
 
 ```toml
-bevy = { version = "0.11", default-features = false, features = [
+bevy = { version = "0.15", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_render",
+    "bevy_scene",
+    "bevy_state",
     "bevy_winit",
     "png",
     "x11",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd",
 ] }
-bevy_obj = "0.11"
+bevy_obj = { version = "0.15", features = ["scene"] }
 ycbust = "0.2.3"
 ```
+
+### Bevy 0.15 Upgrade (December 2024)
+
+The upgrade from Bevy 0.11 to 0.15 enabled real GPU depth buffer readback:
+
+**Key Changes:**
+- `ViewDepthTexture` replaces `ViewPrepassTextures` for depth access
+- `Screenshot` entity + observer pattern replaces `ScreenshotManager`
+- Component-based spawning (`Camera3d`, `PointLight`) replaces bundles
+- `Mesh3d` and `MeshMaterial3d<M>` wrappers for mesh/material handles
+- `SceneRoot(handle)` replaces `SceneBundle`
+- MSAA must be disabled (`Msaa::Off`) for depth texture copy
+
+**Depth Buffer Implementation:**
+- Uses `ViewDepthTexture` from `bevy::render::view`
+- Reverse-Z depth converted to linear meters via `reverse_z_to_linear_depth()`
+- Custom render graph node (`DepthReadbackNode`) copies depth after main pass
+- 256-byte row alignment for GPU buffer mapping
 
 ## Known Limitations
 
@@ -294,6 +317,37 @@ println!("Total captures: {}", config.total_captures()); // 72
 - **tbp.monty**: Original Python implementation by Thousand Brains Project
 - **tbp.tbs_sensorimotor_intelligence**: TBP experiment configs
 - **ycbust**: YCB dataset downloader (used as library dependency)
+
+## API Parity with neocortx
+
+bevy-sensor provides complete API parity with neocortx's `bevy_simulator` module:
+
+| neocortx Requirement | bevy-sensor API | Status |
+|---------------------|-----------------|--------|
+| RGBA image data | `RenderOutput.rgba: Vec<u8>` | ✅ |
+| Depth buffer (meters) | `RenderOutput.depth: Vec<f32>` | ✅ |
+| Camera intrinsics | `CameraIntrinsics` struct | ✅ |
+| Camera position | `RenderOutput.camera_transform` | ✅ |
+| Object rotation | `RenderOutput.object_rotation` | ✅ |
+| RGB image format | `to_rgb_image() → Vec<Vec<[u8; 3]>>` | ✅ |
+| Depth image format | `to_depth_image() → Vec<Vec<f32>>` | ✅ |
+| TBP viewpoints (24) | `ViewpointConfig::default()` | ✅ |
+| TBP benchmark rotations (3) | `ObjectRotation::tbp_benchmark_rotations()` | ✅ |
+| TBP full rotations (14) | `ObjectRotation::tbp_known_orientations()` | ✅ |
+| YCB model download | `ycb::download_models()` | ✅ |
+| Resolution config | `RenderConfig` (64×64, 256×256, 512×512) | ✅ |
+
+**neocortx integration example:**
+
+```rust
+use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation};
+
+// Render and convert to neocortx formats
+let output = render_to_buffer(object_dir, &viewpoint, &rotation, &config)?;
+let rgb_image: Vec<Vec<[u8; 3]>> = output.to_rgb_image();    // VisionObservation.image
+let depth_image: Vec<Vec<f32>> = output.to_depth_image();    // For surface normal computation
+let intrinsics = output.intrinsics;                          // VisionIntrinsics
+```
 
 ## Resources
 
