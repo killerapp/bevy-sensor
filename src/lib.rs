@@ -668,33 +668,8 @@ pub fn render_to_buffer(
     object_rotation: &ObjectRotation,
     config: &RenderConfig,
 ) -> Result<RenderOutput, RenderError> {
-    // Validate paths
-    let mesh_path = object_dir.join("google_16k/textured.obj");
-    let texture_path = object_dir.join("google_16k/texture_map.png");
-
-    if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
-    }
-    if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
-    }
-
-    // TODO: Implement actual Bevy headless rendering
-    // For now, return placeholder data to establish the API
-    let pixel_count = (config.width * config.height) as usize;
-    let intrinsics = config.intrinsics();
-
-    Ok(RenderOutput {
-        rgba: vec![128u8; pixel_count * 4], // Gray placeholder
-        depth: vec![0.5f32; pixel_count],   // 0.5m placeholder depth
-        width: config.width,
-        height: config.height,
-        intrinsics,
-        camera_transform: *camera_transform,
-        object_rotation: object_rotation.clone(),
-    })
+    // Use the actual Bevy headless renderer
+    render::render_headless(object_dir, camera_transform, object_rotation, config)
 }
 
 /// Render all viewpoints and rotations for a YCB object.

@@ -14,6 +14,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::ScreenshotManager;
 use bevy::window::{PresentMode, WindowPlugin, WindowResolution};
 use bevy_obj::ObjPlugin;
+use std::fs::File;
+use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -26,10 +28,19 @@ struct RenderState {
     scene_loaded: bool,
     texture_loaded: bool,
     capture_ready: bool,
+    screenshot_requested: bool,
     captured: bool,
+    exit_requested: bool,
+    exit_frame_count: u32,
     rgba_data: Option<Vec<u8>>,
     depth_data: Option<Vec<f32>>,
+    image_width: u32,
+    image_height: u32,
 }
+
+/// Shared buffer for screenshot callback to write into
+#[derive(Resource, Clone)]
+struct SharedImageBuffer(Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>);
 
 /// Configuration passed to the Bevy app
 #[derive(Resource, Clone)]
@@ -64,11 +75,10 @@ struct SharedOutput(Arc<Mutex<Option<RenderOutput>>>);
 /// Perform headless rendering of a YCB object.
 ///
 /// This spins up a minimal Bevy app, renders frames until assets are loaded,
-/// then extracts placeholder pixel data.
+/// then extracts the rendered frame via screenshot.
 ///
-/// NOTE: Currently returns placeholder data. Full GPU pixel extraction
-/// requires render-to-texture which is complex in Bevy 0.11.
-/// The API is designed for when this is implemented.
+/// Note: Bevy's App::run() may not exit cleanly. A watchdog thread monitors
+/// for results and terminates the process once the render is complete.
 #[allow(dead_code)]
 pub fn render_headless(
     object_dir: &Path,
@@ -98,10 +108,71 @@ pub fn render_headless(
 
     let shared_output: SharedOutput = SharedOutput(Arc::new(Mutex::new(None)));
     let output_clone = shared_output.clone();
+    let output_poll = shared_output.clone();
 
-    // Build and run the Bevy app
+    // Shared buffer for screenshot callback
+    let shared_image: SharedImageBuffer = SharedImageBuffer(Arc::new(Mutex::new(None)));
+    let image_clone = shared_image.clone();
+
+    // Create a temp file path for output serialization
+    let temp_path =
+        std::env::temp_dir().join(format!("bevy_sensor_render_{}.bin", std::process::id()));
+    let temp_path_clone = temp_path.clone();
+
+    // Spawn watchdog thread that monitors for results and exits process when ready
+    std::thread::spawn(move || {
+        let timeout = std::time::Duration::from_secs(60);
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(100);
+
+        loop {
+            // Check if we have a result
+            if let Ok(guard) = output_poll.0.lock() {
+                if let Some(output) = guard.as_ref() {
+                    eprintln!(
+                        "Watchdog: Output detected! {}x{} rgba_len={}",
+                        output.width,
+                        output.height,
+                        output.rgba.len()
+                    );
+                    // Serialize output to temp file
+                    let data = serialize_output(output);
+                    eprintln!(
+                        "Watchdog: Serialized {} bytes to {:?}",
+                        data.len(),
+                        temp_path_clone
+                    );
+                    match File::create(&temp_path_clone) {
+                        Ok(mut file) => {
+                            if let Err(e) = file.write_all(&data) {
+                                eprintln!("Watchdog: Failed to write: {}", e);
+                            } else {
+                                eprintln!("Watchdog: Written successfully");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Watchdog: Failed to create file: {}", e);
+                        }
+                    }
+                    // Give a moment for file to flush
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    eprintln!("Watchdog: Exiting with code 0");
+                    // Exit the process - App::run() won't return otherwise
+                    std::process::exit(0);
+                }
+            }
+
+            if start.elapsed() > timeout {
+                eprintln!("Watchdog: Timeout!");
+                std::process::exit(1); // Timeout
+            }
+
+            std::thread::sleep(poll_interval);
+        }
+    });
+
+    // Run Bevy app on main thread (required by winit)
     App::new()
-        // Minimal plugins for rendering
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -119,33 +190,150 @@ pub fn render_headless(
                 .disable::<bevy::log::LogPlugin>(),
         )
         .add_plugins(ObjPlugin)
-        // Resources
         .insert_resource(request)
         .insert_resource(output_clone)
+        .insert_resource(image_clone)
         .init_resource::<RenderState>()
-        // Systems
         .add_systems(Startup, setup_scene)
         .add_systems(
             Update,
             (
                 check_assets_loaded,
                 apply_materials,
-                capture_frame,
+                request_screenshot,
+                check_screenshot_ready,
                 extract_and_exit,
             )
                 .chain(),
         )
         .run();
 
-    // Extract result
-    let output = shared_output
-        .0
-        .lock()
-        .map_err(|e| RenderError::RenderFailed(format!("Lock failed: {}", e)))?
-        .take()
-        .ok_or_else(|| RenderError::RenderFailed("No output captured".to_string()))?;
+    // If we get here, try to read from temp file (unlikely since watchdog exits)
+    if temp_path.exists() {
+        if let Ok(output) = read_output_from_file(&temp_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Ok(output);
+        }
+    }
 
-    Ok(output)
+    Err(RenderError::RenderFailed(
+        "Render did not complete".to_string(),
+    ))
+}
+
+/// Serialize RenderOutput to bytes for IPC
+fn serialize_output(output: &RenderOutput) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // Header: width, height, rgba_len, depth_len
+    data.extend_from_slice(&output.width.to_le_bytes());
+    data.extend_from_slice(&output.height.to_le_bytes());
+    data.extend_from_slice(&(output.rgba.len() as u32).to_le_bytes());
+    data.extend_from_slice(&(output.depth.len() as u32).to_le_bytes());
+
+    // RGBA data
+    data.extend_from_slice(&output.rgba);
+
+    // Depth data (as f32 bytes)
+    for d in &output.depth {
+        data.extend_from_slice(&d.to_le_bytes());
+    }
+
+    // Intrinsics
+    data.extend_from_slice(&output.intrinsics.focal_length[0].to_le_bytes());
+    data.extend_from_slice(&output.intrinsics.focal_length[1].to_le_bytes());
+    data.extend_from_slice(&output.intrinsics.principal_point[0].to_le_bytes());
+    data.extend_from_slice(&output.intrinsics.principal_point[1].to_le_bytes());
+    data.extend_from_slice(&output.intrinsics.image_size[0].to_le_bytes());
+    data.extend_from_slice(&output.intrinsics.image_size[1].to_le_bytes());
+
+    // Camera transform (translation + rotation quaternion)
+    let t = output.camera_transform.translation;
+    let r = output.camera_transform.rotation;
+    data.extend_from_slice(&t.x.to_le_bytes());
+    data.extend_from_slice(&t.y.to_le_bytes());
+    data.extend_from_slice(&t.z.to_le_bytes());
+    data.extend_from_slice(&r.x.to_le_bytes());
+    data.extend_from_slice(&r.y.to_le_bytes());
+    data.extend_from_slice(&r.z.to_le_bytes());
+    data.extend_from_slice(&r.w.to_le_bytes());
+
+    // Object rotation
+    let or = &output.object_rotation;
+    data.extend_from_slice(&or.pitch.to_le_bytes());
+    data.extend_from_slice(&or.yaw.to_le_bytes());
+    data.extend_from_slice(&or.roll.to_le_bytes());
+
+    data
+}
+
+/// Read RenderOutput from serialized file
+fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderError> {
+    let mut file = File::open(path).map_err(|e| RenderError::RenderFailed(e.to_string()))?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)
+        .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
+
+    let mut cursor = 0;
+
+    let read_u32 = |data: &[u8], cursor: &mut usize| -> u32 {
+        let val = u32::from_le_bytes(data[*cursor..*cursor + 4].try_into().unwrap());
+        *cursor += 4;
+        val
+    };
+
+    let read_f32 = |data: &[u8], cursor: &mut usize| -> f32 {
+        let val = f32::from_le_bytes(data[*cursor..*cursor + 4].try_into().unwrap());
+        *cursor += 4;
+        val
+    };
+
+    let width = read_u32(&data, &mut cursor);
+    let height = read_u32(&data, &mut cursor);
+    let rgba_len = read_u32(&data, &mut cursor) as usize;
+    let depth_len = read_u32(&data, &mut cursor) as usize;
+
+    let rgba = data[cursor..cursor + rgba_len].to_vec();
+    cursor += rgba_len;
+
+    let mut depth = Vec::with_capacity(depth_len);
+    for _ in 0..depth_len {
+        depth.push(read_f32(&data, &mut cursor));
+    }
+
+    let focal_length = [read_f32(&data, &mut cursor), read_f32(&data, &mut cursor)];
+    let principal_point = [read_f32(&data, &mut cursor), read_f32(&data, &mut cursor)];
+    let image_size = [read_u32(&data, &mut cursor), read_u32(&data, &mut cursor)];
+
+    let tx = read_f32(&data, &mut cursor);
+    let ty = read_f32(&data, &mut cursor);
+    let tz = read_f32(&data, &mut cursor);
+    let rx = read_f32(&data, &mut cursor);
+    let ry = read_f32(&data, &mut cursor);
+    let rz = read_f32(&data, &mut cursor);
+    let rw = read_f32(&data, &mut cursor);
+
+    let pitch = read_f32(&data, &mut cursor);
+    let yaw = read_f32(&data, &mut cursor);
+    let roll = read_f32(&data, &mut cursor);
+
+    Ok(RenderOutput {
+        rgba,
+        depth,
+        width,
+        height,
+        intrinsics: crate::CameraIntrinsics {
+            focal_length,
+            principal_point,
+            image_size,
+        },
+        camera_transform: Transform {
+            translation: Vec3::new(tx, ty, tz),
+            rotation: Quat::from_xyzw(rx, ry, rz, rw),
+            scale: Vec3::ONE,
+        },
+        object_rotation: ObjectRotation { pitch, yaw, roll },
+    })
 }
 
 /// Setup the scene with camera, lighting, and object
@@ -323,65 +511,155 @@ fn apply_materials(
     }
 }
 
-/// Capture the rendered frame
-fn capture_frame(
+/// Request a screenshot capture
+fn request_screenshot(
     mut state: ResMut<RenderState>,
-    request: Res<RenderRequest>,
-    _main_window: Query<Entity, With<bevy::window::PrimaryWindow>>,
-    _screenshot_manager: ResMut<ScreenshotManager>,
+    main_window: Query<Entity, With<bevy::window::PrimaryWindow>>,
+    mut screenshot_manager: ResMut<ScreenshotManager>,
+    shared_image: Res<SharedImageBuffer>,
 ) {
-    if !state.capture_ready || state.captured {
+    if !state.capture_ready || state.screenshot_requested {
         return;
     }
 
-    // Generate placeholder data
-    // TODO: Implement actual GPU pixel extraction via render-to-texture
-    // This requires setting up a custom render target and reading back the texture
-    let config = &request.config;
-    let pixel_count = (config.width * config.height) as usize;
+    let Ok(window_entity) = main_window.get_single() else {
+        error!("No primary window found for screenshot");
+        return;
+    };
 
-    // Placeholder RGBA (gray)
-    let rgba = vec![128u8; pixel_count * 4];
+    // Clone the Arc for the callback
+    let image_buffer = shared_image.0.clone();
 
-    // Placeholder depth based on camera distance
-    let camera_dist = request.camera_transform.translation.length();
-    let depth = vec![camera_dist; pixel_count];
+    // Request screenshot with callback
+    info!("Requesting screenshot from window {:?}", window_entity);
+    if let Err(e) = screenshot_manager.take_screenshot(window_entity, move |image| {
+        // This callback runs on AsyncComputeTaskPool thread
+        // eprintln!("Screenshot callback triggered!");
+        // Extract RGBA data from the Image
+        let width = image.texture_descriptor.size.width;
+        let height = image.texture_descriptor.size.height;
 
-    state.rgba_data = Some(rgba);
-    state.depth_data = Some(depth);
-    state.captured = true;
+        // Convert image data to RGBA8
+        let rgba_data = match image.texture_descriptor.format {
+            bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb
+            | bevy::render::render_resource::TextureFormat::Rgba8Unorm => {
+                // Already in RGBA8 format
+                image.data.clone()
+            }
+            bevy::render::render_resource::TextureFormat::Bgra8UnormSrgb
+            | bevy::render::render_resource::TextureFormat::Bgra8Unorm => {
+                // Convert BGRA to RGBA
+                let mut rgba = image.data.clone();
+                for chunk in rgba.chunks_exact_mut(4) {
+                    chunk.swap(0, 2); // Swap B and R
+                }
+                rgba
+            }
+            _other => {
+                // Unknown texture format - use raw data
+                image.data.clone()
+            }
+        };
 
-    info!("Frame captured (placeholder data - actual GPU readback not yet implemented)");
+        // Store in shared buffer
+        // eprintln!("Storing {}x{} image ({} bytes) in shared buffer", width, height, rgba_data.len());
+        if let Ok(mut guard) = image_buffer.lock() {
+            *guard = Some((rgba_data, width, height));
+            // eprintln!("Image stored in shared buffer");
+        } else {
+            // eprintln!("Failed to lock shared buffer!");
+        }
+    }) {
+        error!("Failed to request screenshot: {:?}", e);
+        return;
+    }
+
+    state.screenshot_requested = true;
+    info!("Screenshot requested");
+}
+
+/// Check if screenshot callback has completed
+fn check_screenshot_ready(
+    mut state: ResMut<RenderState>,
+    shared_image: Res<SharedImageBuffer>,
+    request: Res<RenderRequest>,
+) {
+    if !state.screenshot_requested || state.captured {
+        return;
+    }
+
+    // Check if callback has written data
+    if let Ok(guard) = shared_image.0.lock() {
+        if let Some((rgba_data, width, height)) = guard.as_ref() {
+            // eprintln!("Found image data in shared buffer: {}x{}", width, height);
+            state.rgba_data = Some(rgba_data.clone());
+            state.image_width = *width;
+            state.image_height = *height;
+
+            // Generate depth data (placeholder - depth buffer extraction is separate)
+            // For now, use camera distance as uniform depth
+            let camera_dist = request.camera_transform.translation.length();
+            let pixel_count = (*width * *height) as usize;
+            state.depth_data = Some(vec![camera_dist; pixel_count]);
+
+            state.captured = true;
+        }
+    }
 }
 
 /// Extract results and exit
 fn extract_and_exit(
-    state: Res<RenderState>,
+    mut state: ResMut<RenderState>,
     request: Res<RenderRequest>,
     shared_output: Res<SharedOutput>,
-    mut exit: EventWriter<bevy::app::AppExit>,
+    mut commands: Commands,
+    windows: Query<Entity, With<bevy::window::Window>>,
 ) {
+    // Handle delayed exit after closing window
+    if state.exit_requested {
+        state.exit_frame_count += 1;
+        // After a few frames with no window, Bevy should exit
+        return;
+    }
+
     if !state.captured {
         return;
     }
 
     if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+        // eprintln!("extract_and_exit: have rgba ({} bytes) and depth ({} values)", rgba.len(), depth.len());
+        // Use actual captured dimensions (may differ from config if window was resized)
+        let width = state.image_width;
+        let height = state.image_height;
+
+        // Compute intrinsics based on actual dimensions
         let config = &request.config;
+        let intrinsics = crate::CameraIntrinsics {
+            focal_length: [width as f32 * config.zoom, height as f32 * config.zoom],
+            principal_point: [width as f32 / 2.0, height as f32 / 2.0],
+            image_size: [width, height],
+        };
+
         let output = RenderOutput {
             rgba: rgba.clone(),
             depth: depth.clone(),
-            width: config.width,
-            height: config.height,
-            intrinsics: config.intrinsics(),
+            width,
+            height,
+            intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
         };
 
         if let Ok(mut guard) = shared_output.0.lock() {
             *guard = Some(output);
+            // eprintln!("Output stored in shared_output");
         }
 
-        info!("Output extracted, exiting");
-        exit.send(bevy::app::AppExit);
+        // Close all windows to trigger app exit
+        // eprintln!("Closing windows to trigger exit...");
+        for window_entity in windows.iter() {
+            commands.entity(window_entity).despawn();
+        }
+        state.exit_requested = true;
     }
 }
