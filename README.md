@@ -7,14 +7,14 @@ A Bevy library and CLI for capturing multi-view images of 3D OBJ models, designe
 - Multi-viewpoint capture using spherical coordinates
 - Object rotation support matching TBP benchmark formats
 - Library API for integration with neocortx
-- Programmatic YCB model downloads via ycbust
+- Programmatic YCB model downloads via [ycbust](https://crates.io/crates/ycbust) (v0.2.4)
 - Pre-configured TBP benchmark and training configurations
 
 ## Requirements
 
 - Rust 1.70+
-- Bevy 0.11
-- GPU (software rendering has limitations)
+- Bevy 0.15
+- GPU with Vulkan support (required for headless rendering on WSL2/Linux)
 
 ## Setup
 
@@ -99,13 +99,13 @@ for obj in REPRESENTATIVE_OBJECTS {
 
 ## Headless Rendering
 
+For headless GPU rendering on WSL2/Linux, use the Vulkan backend:
+
 ```bash
-LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
-  xvfb-run -a -s "-screen 0 1280x1024x24" \
-  cargo run --release
+WGPU_BACKEND=vulkan cargo run --release
 ```
 
-Note: PBR shaders may fail with software rendering. Real GPU recommended.
+The library uses true headless rendering with `RenderTarget::Image` - no display or window surface required.
 
 ## Output
 
