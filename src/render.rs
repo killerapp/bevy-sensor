@@ -99,7 +99,7 @@ struct RenderState {
     #[allow(dead_code)]
     exit_frame_count: u32,
     rgba_data: Option<Vec<u8>>,
-    depth_data: Option<Vec<f32>>,
+    depth_data: Option<Vec<f64>>,
     image_width: u32,
     image_height: u32,
 }
@@ -112,9 +112,10 @@ struct SharedImageBuffer(Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>);
 
 /// Shared buffer for depth data from GPU readback
 /// Contains: (linear_depth_values, width, height)
+/// Uses f64 for TBP numerical precision compatibility.
 #[derive(Resource, Clone, Default)]
 #[allow(clippy::type_complexity)]
-struct SharedDepthBuffer(Arc<Mutex<Option<(Vec<f32>, u32, u32)>>>);
+struct SharedDepthBuffer(Arc<Mutex<Option<(Vec<f64>, u32, u32)>>>);
 
 // ============================================================================
 // Depth Readback Infrastructure
@@ -209,11 +210,11 @@ mod depth_helpers {
         depth_values
     }
 
-    /// Convert all NDC depth values to linear meters
-    pub fn convert_depth_to_linear(raw_depth: &[f32], near: f32, far: f32) -> Vec<f32> {
+    /// Convert all NDC depth values to linear meters (as f64 for TBP precision)
+    pub fn convert_depth_to_linear(raw_depth: &[f32], near: f32, far: f32) -> Vec<f64> {
         raw_depth
             .iter()
-            .map(|&ndc| reverse_z_to_linear_depth(ndc, near, far))
+            .map(|&ndc| reverse_z_to_linear_depth(ndc, near, far) as f64)
             .collect()
     }
 
@@ -320,20 +321,20 @@ mod depth_helpers {
 
         #[test]
         fn test_convert_depth_to_linear_batch() {
-            let near = 0.01;
-            let far = 10.0;
-            let ndc_depths = vec![1.0, 0.5, 0.1, 0.0];
+            let near = 0.01f32;
+            let far = 10.0f32;
+            let ndc_depths = vec![1.0f32, 0.5, 0.1, 0.0];
 
             let linear = convert_depth_to_linear(&ndc_depths, near, far);
 
             assert_eq!(linear.len(), 4);
             // Near plane
-            assert!((linear[0] - near).abs() < 0.001);
+            assert!((linear[0] - near as f64).abs() < 0.001);
             // Far plane
-            assert!((linear[3] - far).abs() < 0.001);
+            assert!((linear[3] - far as f64).abs() < 0.001);
             // All should be in range [near, far]
             for d in &linear {
-                assert!(*d >= near && *d <= far);
+                assert!(*d >= near as f64 && *d <= far as f64);
             }
         }
 
@@ -1039,12 +1040,12 @@ fn serialize_output(output: &RenderOutput) -> Vec<u8> {
     // RGBA data
     data.extend_from_slice(&output.rgba);
 
-    // Depth data (as f32 bytes)
+    // Depth data (as f64 bytes for TBP precision)
     for d in &output.depth {
         data.extend_from_slice(&d.to_le_bytes());
     }
 
-    // Intrinsics
+    // Intrinsics (f64 for TBP precision)
     data.extend_from_slice(&output.intrinsics.focal_length[0].to_le_bytes());
     data.extend_from_slice(&output.intrinsics.focal_length[1].to_le_bytes());
     data.extend_from_slice(&output.intrinsics.principal_point[0].to_le_bytes());
@@ -1063,7 +1064,7 @@ fn serialize_output(output: &RenderOutput) -> Vec<u8> {
     data.extend_from_slice(&r.z.to_le_bytes());
     data.extend_from_slice(&r.w.to_le_bytes());
 
-    // Object rotation
+    // Object rotation (f64)
     let or = &output.object_rotation;
     data.extend_from_slice(&or.pitch.to_le_bytes());
     data.extend_from_slice(&or.yaw.to_le_bytes());
@@ -1093,6 +1094,12 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
         val
     };
 
+    let read_f64 = |data: &[u8], cursor: &mut usize| -> f64 {
+        let val = f64::from_le_bytes(data[*cursor..*cursor + 8].try_into().unwrap());
+        *cursor += 8;
+        val
+    };
+
     let width = read_u32(&data, &mut cursor);
     let height = read_u32(&data, &mut cursor);
     let rgba_len = read_u32(&data, &mut cursor) as usize;
@@ -1101,15 +1108,18 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
     let rgba = data[cursor..cursor + rgba_len].to_vec();
     cursor += rgba_len;
 
+    // Depth data (f64 for TBP precision)
     let mut depth = Vec::with_capacity(depth_len);
     for _ in 0..depth_len {
-        depth.push(read_f32(&data, &mut cursor));
+        depth.push(read_f64(&data, &mut cursor));
     }
 
-    let focal_length = [read_f32(&data, &mut cursor), read_f32(&data, &mut cursor)];
-    let principal_point = [read_f32(&data, &mut cursor), read_f32(&data, &mut cursor)];
+    // Intrinsics (f64 for TBP precision)
+    let focal_length = [read_f64(&data, &mut cursor), read_f64(&data, &mut cursor)];
+    let principal_point = [read_f64(&data, &mut cursor), read_f64(&data, &mut cursor)];
     let image_size = [read_u32(&data, &mut cursor), read_u32(&data, &mut cursor)];
 
+    // Camera transform (f32 for Bevy compatibility)
     let tx = read_f32(&data, &mut cursor);
     let ty = read_f32(&data, &mut cursor);
     let tz = read_f32(&data, &mut cursor);
@@ -1118,9 +1128,10 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
     let rz = read_f32(&data, &mut cursor);
     let rw = read_f32(&data, &mut cursor);
 
-    let pitch = read_f32(&data, &mut cursor);
-    let yaw = read_f32(&data, &mut cursor);
-    let roll = read_f32(&data, &mut cursor);
+    // Object rotation (f64)
+    let pitch = read_f64(&data, &mut cursor);
+    let yaw = read_f64(&data, &mut cursor);
+    let roll = read_f64(&data, &mut cursor);
 
     Ok(RenderOutput {
         rgba,
@@ -1402,7 +1413,7 @@ fn check_screenshot_ready(
     // If depth readback failed or is taking too long, fall back to placeholder
     // (This allows graceful degradation on systems where depth readback fails)
     if rgba_ready && !depth_ready && state.frame_count > 60 {
-        let camera_dist = request.camera_transform.translation.length();
+        let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
         state.depth_data = Some(vec![camera_dist; pixel_count]);
     }
@@ -1438,11 +1449,14 @@ fn extract_and_exit(
         let width = state.image_width;
         let height = state.image_height;
 
-        // Compute intrinsics based on actual dimensions
+        // Compute intrinsics based on actual dimensions (f64 for TBP precision)
         let config = &request.config;
         let intrinsics = crate::CameraIntrinsics {
-            focal_length: [width as f32 * config.zoom, height as f32 * config.zoom],
-            principal_point: [width as f32 / 2.0, height as f32 / 2.0],
+            focal_length: [
+                width as f64 * config.zoom as f64,
+                height as f64 * config.zoom as f64,
+            ],
+            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
             image_size: [width, height],
         };
 
@@ -1666,7 +1680,7 @@ fn check_headless_capture_ready(
 
     // Fallback to placeholder depth after 10 frames (depth not working in headless mode)
     if rgba_ready && !depth_ready && state.frame_count > 10 {
-        let camera_dist = request.camera_transform.translation.length();
+        let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
         state.depth_data = Some(vec![camera_dist; pixel_count]);
     }
@@ -1695,10 +1709,14 @@ fn extract_and_exit_headless(
         let width = state.image_width;
         let height = state.image_height;
 
+        // Compute intrinsics (f64 for TBP precision)
         let config = &request.config;
         let intrinsics = crate::CameraIntrinsics {
-            focal_length: [width as f32 * config.zoom, height as f32 * config.zoom],
-            principal_point: [width as f32 / 2.0, height as f32 / 2.0],
+            focal_length: [
+                width as f64 * config.zoom as f64,
+                height as f64 * config.zoom as f64,
+            ],
+            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
             image_size: [width, height],
         };
 
@@ -1872,8 +1890,8 @@ fn save_rgba_to_png(rgba: &[u8], width: u32, height: u32, path: &Path) -> Result
     img.save(path).map_err(|e| e.to_string())
 }
 
-/// Save depth data to binary file
-fn save_depth_to_binary(depth: &[f32], path: &Path) -> Result<(), String> {
+/// Save depth data to binary file (f64 for TBP precision)
+fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
     // Create parent directories if needed
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
