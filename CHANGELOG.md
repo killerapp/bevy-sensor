@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/killerapp/bevy-sensor/compare/v0.2.2...v0.3.0) - 2025-12-17
+
+### Added
+
+- [**breaking**] migrate public API from f32 to f64 for TBP numerical precision ([#11](https://github.com/killerapp/bevy-sensor/pull/11))
+
 ## [0.2.2](https://github.com/killerapp/bevy-sensor/compare/v0.2.1...v0.2.2) - 2025-12-15
 
 ### Other
