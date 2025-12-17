@@ -195,8 +195,15 @@ fn run_batch_render(args: &[String]) {
         renders_per_object: viewpoints.len() * rotations.len(),
         resolution: [render_config.width, render_config.height],
         intrinsics: IntrinsicsMetadata {
-            focal_length: intrinsics.focal_length,
-            principal_point: intrinsics.principal_point,
+            // Convert f64 intrinsics to f32 for JSON serialization (backward compatible)
+            focal_length: [
+                intrinsics.focal_length[0] as f32,
+                intrinsics.focal_length[1] as f32,
+            ],
+            principal_point: [
+                intrinsics.principal_point[0] as f32,
+                intrinsics.principal_point[1] as f32,
+            ],
             image_size: intrinsics.image_size,
         },
         viewpoint_config: ViewpointConfigMetadata {
@@ -204,7 +211,11 @@ fn run_batch_render(args: &[String]) {
             yaw_count: viewpoint_config.yaw_count,
             pitch_angles_deg: viewpoint_config.pitch_angles_deg.clone(),
         },
-        rotations: rotations.iter().map(|r| [r.pitch, r.yaw, r.roll]).collect(),
+        // Convert f64 rotations to f32 for JSON serialization (backward compatible)
+        rotations: rotations
+            .iter()
+            .map(|r| [r.pitch as f32, r.yaw as f32, r.roll as f32])
+            .collect(),
     };
 
     // Save dataset metadata
@@ -261,7 +272,12 @@ fn run_batch_render(args: &[String]) {
                             object_id: object_id.clone(),
                             rotation_index: rot_idx,
                             viewpoint_index: view_idx,
-                            rotation_euler: [rotation.pitch, rotation.yaw, rotation.roll],
+                            // Convert f64 rotation to f32 for JSON serialization
+                            rotation_euler: [
+                                rotation.pitch as f32,
+                                rotation.yaw as f32,
+                                rotation.roll as f32,
+                            ],
                             camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
                             rgba_file: format!("r{}_v{:02}.png", rot_idx, view_idx),
                             depth_file: format!("r{}_v{:02}.depth", rot_idx, view_idx),
