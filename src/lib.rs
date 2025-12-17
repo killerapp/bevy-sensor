@@ -141,21 +141,21 @@ pub mod ycb {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectRotation {
     /// Rotation around X-axis (pitch) in degrees
-    pub pitch: f32,
+    pub pitch: f64,
     /// Rotation around Y-axis (yaw) in degrees
-    pub yaw: f32,
+    pub yaw: f64,
     /// Rotation around Z-axis (roll) in degrees
-    pub roll: f32,
+    pub roll: f64,
 }
 
 impl ObjectRotation {
     /// Create a new rotation from Euler angles in degrees
-    pub fn new(pitch: f32, yaw: f32, roll: f32) -> Self {
+    pub fn new(pitch: f64, yaw: f64, roll: f64) -> Self {
         Self { pitch, yaw, roll }
     }
 
     /// Create from TBP-style array [pitch, yaw, roll] in degrees
-    pub fn from_array(arr: [f32; 3]) -> Self {
+    pub fn from_array(arr: [f64; 3]) -> Self {
         Self {
             pitch: arr[0],
             yaw: arr[1],
@@ -201,13 +201,13 @@ impl ObjectRotation {
         ]
     }
 
-    /// Convert to Bevy Quat
+    /// Convert to Bevy Quat (converts f64 to f32 for Bevy compatibility)
     pub fn to_quat(&self) -> Quat {
         Quat::from_euler(
             EulerRot::XYZ,
-            self.pitch.to_radians(),
-            self.yaw.to_radians(),
-            self.roll.to_radians(),
+            (self.pitch as f32).to_radians(),
+            (self.yaw as f32).to_radians(),
+            (self.roll as f32).to_radians(),
         )
     }
 
@@ -493,15 +493,16 @@ impl RenderConfig {
     /// Compute camera intrinsics for use with neocortx.
     ///
     /// Returns focal length and principal point based on resolution and FOV.
+    /// Uses f64 for TBP numerical precision compatibility.
     pub fn intrinsics(&self) -> CameraIntrinsics {
-        let fov = self.fov_radians();
+        let fov = self.fov_radians() as f64;
         // focal_length = (height/2) / tan(fov/2)
-        let fy = (self.height as f32 / 2.0) / (fov / 2.0).tan();
+        let fy = (self.height as f64 / 2.0) / (fov / 2.0).tan();
         let fx = fy; // Assuming square pixels
 
         CameraIntrinsics {
             focal_length: [fx, fy],
-            principal_point: [self.width as f32 / 2.0, self.height as f32 / 2.0],
+            principal_point: [self.width as f64 / 2.0, self.height as f64 / 2.0],
             image_size: [self.width, self.height],
         }
     }
@@ -510,32 +511,33 @@ impl RenderConfig {
 /// Camera intrinsic parameters for 3D reconstruction.
 ///
 /// Compatible with neocortx's VisionIntrinsics format.
+/// Uses f64 for TBP numerical precision compatibility.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CameraIntrinsics {
     /// Focal length in pixels (fx, fy)
-    pub focal_length: [f32; 2],
+    pub focal_length: [f64; 2],
     /// Principal point (cx, cy) - typically image center
-    pub principal_point: [f32; 2],
+    pub principal_point: [f64; 2],
     /// Image dimensions (width, height)
     pub image_size: [u32; 2],
 }
 
 impl CameraIntrinsics {
     /// Project a 3D point to 2D pixel coordinates.
-    pub fn project(&self, point: Vec3) -> Option<[f32; 2]> {
+    pub fn project(&self, point: Vec3) -> Option<[f64; 2]> {
         if point.z <= 0.0 {
             return None;
         }
-        let x = (point.x / point.z) * self.focal_length[0] + self.principal_point[0];
-        let y = (point.y / point.z) * self.focal_length[1] + self.principal_point[1];
+        let x = (point.x as f64 / point.z as f64) * self.focal_length[0] + self.principal_point[0];
+        let y = (point.y as f64 / point.z as f64) * self.focal_length[1] + self.principal_point[1];
         Some([x, y])
     }
 
-    /// Unproject a 2D pixel to a 3D ray direction.
-    pub fn unproject(&self, pixel: [f32; 2], depth: f32) -> Vec3 {
+    /// Unproject a 2D pixel to a 3D point at given depth.
+    pub fn unproject(&self, pixel: [f64; 2], depth: f64) -> [f64; 3] {
         let x = (pixel[0] - self.principal_point[0]) / self.focal_length[0] * depth;
         let y = (pixel[1] - self.principal_point[1]) / self.focal_length[1] * depth;
-        Vec3::new(x, y, depth)
+        [x, y, depth]
     }
 }
 
@@ -544,9 +546,10 @@ impl CameraIntrinsics {
 pub struct RenderOutput {
     /// RGBA pixel data in row-major order (width * height * 4 bytes)
     pub rgba: Vec<u8>,
-    /// Depth values in meters, row-major order (width * height floats)
+    /// Depth values in meters, row-major order (width * height f64s)
     /// Values are linear depth from camera, not normalized.
-    pub depth: Vec<f32>,
+    /// Uses f64 for TBP numerical precision compatibility.
+    pub depth: Vec<f64>,
     /// Image width in pixels
     pub width: u32,
     /// Image height in pixels
@@ -575,7 +578,7 @@ impl RenderOutput {
     }
 
     /// Get depth value at (x, y) in meters. Returns None if out of bounds.
-    pub fn get_depth(&self, x: u32, y: u32) -> Option<f32> {
+    pub fn get_depth(&self, x: u32, y: u32) -> Option<f64> {
         if x >= self.width || y >= self.height {
             return None;
         }
@@ -601,8 +604,8 @@ impl RenderOutput {
         image
     }
 
-    /// Convert depth to neocortx-compatible format: Vec<Vec<f32>>
-    pub fn to_depth_image(&self) -> Vec<Vec<f32>> {
+    /// Convert depth to neocortx-compatible format: Vec<Vec<f64>>
+    pub fn to_depth_image(&self) -> Vec<Vec<f64>> {
         let mut image = Vec::with_capacity(self.height as usize);
         for y in 0..self.height {
             let mut row = Vec::with_capacity(self.width as usize);
@@ -994,9 +997,9 @@ mod tests {
 
         // Unproject principal point at depth 1.0
         let point = intrinsics.unproject([32.0, 32.0], 1.0);
-        assert!((point.x).abs() < 0.001);
-        assert!((point.y).abs() < 0.001);
-        assert!((point.z - 1.0).abs() < 0.001);
+        assert!((point[0]).abs() < 0.001); // x
+        assert!((point[1]).abs() < 0.001); // y
+        assert!((point[2] - 1.0).abs() < 0.001); // z
     }
 
     #[test]
@@ -1180,13 +1183,13 @@ mod tests {
         let original = Vec3::new(0.5, -0.3, 2.0);
         let projected = intrinsics.project(original).unwrap();
 
-        // Unproject back with the same depth
-        let unprojected = intrinsics.unproject(projected, original.z);
+        // Unproject back with the same depth (convert f32 to f64)
+        let unprojected = intrinsics.unproject(projected, original.z as f64);
 
         // Should get back approximately the same point
-        assert!((unprojected.x - original.x).abs() < 0.001);
-        assert!((unprojected.y - original.y).abs() < 0.001);
-        assert!((unprojected.z - original.z).abs() < 0.001);
+        assert!((unprojected[0] - original.x as f64).abs() < 0.001); // x
+        assert!((unprojected[1] - original.y as f64).abs() < 0.001); // y
+        assert!((unprojected[2] - original.z as f64).abs() < 0.001); // z
     }
 
     #[test]

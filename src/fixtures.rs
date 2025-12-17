@@ -197,11 +197,17 @@ impl TestFixtures {
         self.indices.get(object_id).map(|v| v.len()).unwrap_or(0)
     }
 
-    /// Get camera intrinsics
+    /// Get camera intrinsics (converts from f32 metadata to f64 for TBP precision)
     pub fn intrinsics(&self) -> CameraIntrinsics {
         CameraIntrinsics {
-            focal_length: self.metadata.intrinsics.focal_length,
-            principal_point: self.metadata.intrinsics.principal_point,
+            focal_length: [
+                self.metadata.intrinsics.focal_length[0] as f64,
+                self.metadata.intrinsics.focal_length[1] as f64,
+            ],
+            principal_point: [
+                self.metadata.intrinsics.principal_point[0] as f64,
+                self.metadata.intrinsics.principal_point[1] as f64,
+            ],
             image_size: self.metadata.intrinsics.image_size,
         }
     }
@@ -250,9 +256,10 @@ impl TestFixtures {
         let camera_transform =
             Transform::from_xyz(pos[0], pos[1], pos[2]).looking_at(Vec3::ZERO, Vec3::Y);
 
-        // Build object rotation
+        // Build object rotation (convert from f32 metadata to f64)
         let rot = render_meta.rotation_euler;
-        let object_rotation = crate::ObjectRotation::new(rot[0], rot[1], rot[2]);
+        let object_rotation =
+            crate::ObjectRotation::new(rot[0] as f64, rot[1] as f64, rot[2] as f64);
 
         Ok(RenderOutput {
             rgba,
@@ -307,16 +314,16 @@ fn load_rgba_png(path: &Path) -> Result<Vec<u8>, FixtureError> {
     Ok(rgba.into_raw())
 }
 
-/// Load depth data from binary f32 file
-fn load_depth_binary(path: &Path) -> Result<Vec<f32>, FixtureError> {
+/// Load depth data from binary f32 file and convert to f64 for TBP precision
+fn load_depth_binary(path: &Path) -> Result<Vec<f64>, FixtureError> {
     let bytes = fs::read(path)?;
 
-    // Convert from little-endian bytes to f32
-    let depth: Vec<f32> = bytes
+    // Convert from little-endian bytes to f32, then to f64 for TBP precision
+    let depth: Vec<f64> = bytes
         .chunks_exact(4)
         .map(|chunk| {
             let arr: [u8; 4] = chunk.try_into().unwrap();
-            f32::from_le_bytes(arr)
+            f32::from_le_bytes(arr) as f64
         })
         .collect();
 

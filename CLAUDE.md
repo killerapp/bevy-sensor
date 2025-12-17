@@ -81,9 +81,9 @@ let output = render_to_buffer(
 
 // Access rendered data
 let rgba: &[u8] = &output.rgba;           // 64*64*4 bytes
-let depth: &[f32] = &output.depth;        // 64*64 floats (meters)
+let depth: &[f64] = &output.depth;        // 64*64 f64 (meters, TBP precision)
 let rgb_image = output.to_rgb_image();    // Vec<Vec<[u8; 3]>> for neocortx
-let depth_image = output.to_depth_image(); // Vec<Vec<f32>> for neocortx
+let depth_image = output.to_depth_image(); // Vec<Vec<f64>> for neocortx
 ```
 
 **RenderConfig options:**
@@ -107,15 +107,15 @@ let depth_image = output.to_depth_image(); // Vec<Vec<f32>> for neocortx
 
 ```rust
 let intrinsics = config.intrinsics();
-// intrinsics.focal_length: [f32; 2]     - (fx, fy) in pixels
-// intrinsics.principal_point: [f32; 2]  - (cx, cy) center
+// intrinsics.focal_length: [f64; 2]     - (fx, fy) in pixels (TBP precision)
+// intrinsics.principal_point: [f64; 2]  - (cx, cy) center (TBP precision)
 // intrinsics.image_size: [u32; 2]       - (width, height)
 
-// Project 3D to 2D
-let pixel = intrinsics.project(point_3d);  // Option<[f32; 2]>
+// Project 3D to 2D (accepts Bevy Vec3, returns f64)
+let pixel = intrinsics.project(point_3d);  // Option<[f64; 2]>
 
-// Unproject 2D + depth to 3D
-let point = intrinsics.unproject([32.0, 32.0], depth);  // Vec3
+// Unproject 2D + depth to 3D (all f64 for TBP precision)
+let point = intrinsics.unproject([32.0, 32.0], depth);  // [f64; 3]
 ```
 
 > **Note:** Full GPU rendering requires a display (X11/Wayland). The depth buffer
@@ -398,12 +398,12 @@ bevy-sensor provides complete API parity with neocortx's `bevy_simulator` module
 | neocortx Requirement | bevy-sensor API | Status |
 |---------------------|-----------------|--------|
 | RGBA image data | `RenderOutput.rgba: Vec<u8>` | ✅ |
-| Depth buffer (meters) | `RenderOutput.depth: Vec<f32>` | ✅ |
-| Camera intrinsics | `CameraIntrinsics` struct | ✅ |
+| Depth buffer (meters, f64) | `RenderOutput.depth: Vec<f64>` | ✅ |
+| Camera intrinsics (f64) | `CameraIntrinsics` struct | ✅ |
 | Camera position | `RenderOutput.camera_transform` | ✅ |
-| Object rotation | `RenderOutput.object_rotation` | ✅ |
+| Object rotation (f64) | `RenderOutput.object_rotation` | ✅ |
 | RGB image format | `to_rgb_image() → Vec<Vec<[u8; 3]>>` | ✅ |
-| Depth image format | `to_depth_image() → Vec<Vec<f32>>` | ✅ |
+| Depth image format (f64) | `to_depth_image() → Vec<Vec<f64>>` | ✅ |
 | TBP viewpoints (24) | `ViewpointConfig::default()` | ✅ |
 | TBP benchmark rotations (3) | `ObjectRotation::tbp_benchmark_rotations()` | ✅ |
 | TBP full rotations (14) | `ObjectRotation::tbp_known_orientations()` | ✅ |
@@ -418,9 +418,41 @@ use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotatio
 // Render and convert to neocortx formats
 let output = render_to_buffer(object_dir, &viewpoint, &rotation, &config)?;
 let rgb_image: Vec<Vec<[u8; 3]>> = output.to_rgb_image();    // VisionObservation.image
-let depth_image: Vec<Vec<f32>> = output.to_depth_image();    // For surface normal computation
-let intrinsics = output.intrinsics;                          // VisionIntrinsics
+let depth_image: Vec<Vec<f64>> = output.to_depth_image();    // For surface normal (f64 precision)
+let intrinsics = output.intrinsics;                          // CameraIntrinsics (f64)
 ```
+
+## Release Flow & Versioning
+
+**Version bumps are handled automatically by release-please.** Do NOT manually bump version numbers in `Cargo.toml`.
+
+### Conventional Commits
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for automated changelog and version management:
+
+- `feat:` - New features (minor version bump)
+- `fix:` - Bug fixes (patch version bump)
+- `feat!:` or `BREAKING CHANGE:` - Breaking changes (major version bump)
+- `docs:`, `chore:`, `refactor:`, `test:` - No version bump
+
+### Release Process
+
+1. Merge PRs with conventional commit messages to `main`
+2. release-please creates/updates a "Release PR" with:
+   - Updated `Cargo.toml` version
+   - Updated `CHANGELOG.md`
+3. Merge the Release PR to trigger:
+   - Git tag creation
+   - GitHub release
+   - crates.io publish (if configured)
+
+### Breaking Changes
+
+When making breaking API changes (like f32 → f64 migration):
+
+1. Use `feat!:` prefix in commit message
+2. Include `BREAKING CHANGE:` section in commit body
+3. Document migration in PR description
 
 ## Resources
 
