@@ -48,10 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Unique colors in image: {}", unique_colors.len());
 
     // Check depth variation (should not be uniform if real depth readback works)
-    let unique_depths: std::collections::HashSet<u32> =
+    let unique_depths: std::collections::HashSet<u64> =
         output.depth.iter().map(|d| d.to_bits()).collect();
-    let depth_min = output.depth.iter().cloned().reduce(f32::min);
-    let depth_max = output.depth.iter().cloned().reduce(f32::max);
+    let depth_min = output.depth.iter().cloned().reduce(f64::min);
+    let depth_max = output.depth.iter().cloned().reduce(f64::max);
     println!(
         "Unique depth values: {} (range: {:?} to {:?})",
         unique_depths.len(),
