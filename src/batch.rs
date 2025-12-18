@@ -172,10 +172,7 @@ impl BatchRenderOutput {
 #[derive(Debug, Clone)]
 pub enum BatchRenderError {
     /// Some renders succeeded, others failed
-    PartialFailure {
-        successful: usize,
-        failed: usize,
-    },
+    PartialFailure { successful: usize, failed: usize },
     /// All renders failed
     TotalFailure(String),
     /// Invalid configuration

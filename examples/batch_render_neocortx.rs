@@ -10,9 +10,9 @@
 //! ```
 
 use bevy_sensor::{
-    create_batch_renderer, queue_render_request, render_next_in_batch, BatchRenderConfig,
-    BatchRenderRequest, ObjectRotation, RenderConfig, RenderStatus, ViewpointConfig,
-    generate_viewpoints,
+    create_batch_renderer, generate_viewpoints, queue_render_request, render_next_in_batch,
+    BatchRenderConfig, BatchRenderRequest, ObjectRotation, RenderConfig, RenderStatus,
+    ViewpointConfig,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -29,7 +29,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !object_dir.exists() {
         eprintln!("Object directory not found: {:?}", object_dir);
         eprintln!("Please download YCB dataset first:");
-        eprintln!("  bevy_sensor::ycb::download_models(\"/tmp/ycb\", Subset::Representative).await?;");
+        eprintln!(
+            "  bevy_sensor::ycb::download_models(\"/tmp/ycb\", Subset::Representative).await?;"
+        );
         return Err("Object directory not found".into());
     }
 
@@ -45,10 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewpoints.len(),
         rotations.len()
     );
-    println!(
-        "  Total renders: {}\n",
-        viewpoints.len() * rotations.len()
-    );
+    println!("  Total renders: {}\n", viewpoints.len() * rotations.len());
 
     // Create batch renderer
     let batch_config = BatchRenderConfig::default();
@@ -151,23 +150,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(output) = outputs.first() {
             println!("  Image size: {}x{}", output.width, output.height);
             println!("  RGBA data: {} bytes", output.rgba.len());
-            println!("  Depth data: {} floats ({} bytes)", output.depth.len(), output.depth.len() * 8);
-            println!("  Intrinsics:");
-            println!("    Focal length: [{:.2}, {:.2}]",
-                output.intrinsics.focal_length[0],
-                output.intrinsics.focal_length[1]
+            println!(
+                "  Depth data: {} floats ({} bytes)",
+                output.depth.len(),
+                output.depth.len() * 8
             );
-            println!("    Principal point: [{:.2}, {:.2}]",
-                output.intrinsics.principal_point[0],
-                output.intrinsics.principal_point[1]
+            println!("  Intrinsics:");
+            println!(
+                "    Focal length: [{:.2}, {:.2}]",
+                output.intrinsics.focal_length[0], output.intrinsics.focal_length[1]
+            );
+            println!(
+                "    Principal point: [{:.2}, {:.2}]",
+                output.intrinsics.principal_point[0], output.intrinsics.principal_point[1]
             );
 
             // Show how to convert to neocortx formats
             println!("\n  neocortx Integration:");
             let rgb_image = output.to_rgb_image();
             let depth_image = output.to_depth_image();
-            println!("    RGB image: {}x{} pixels", rgb_image.len(), rgb_image[0].len());
-            println!("    Depth image: {}x{} floats", depth_image.len(), depth_image[0].len());
+            println!(
+                "    RGB image: {}x{} pixels",
+                rgb_image.len(),
+                rgb_image[0].len()
+            );
+            println!(
+                "    Depth image: {}x{} floats",
+                depth_image.len(),
+                depth_image[0].len()
+            );
             println!("    Sample pixel (0,0) RGB: {:?}", rgb_image[0][0]);
             println!("    Sample pixel (0,0) depth: {:.3}m", depth_image[0][0]);
         }
