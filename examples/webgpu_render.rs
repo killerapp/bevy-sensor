@@ -24,8 +24,8 @@
 //! ```
 
 use bevy_sensor::{
-    backend::{BackendConfig, detect_platform},
-    render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation,
+    backend::{detect_platform, BackendConfig},
+    render_to_buffer, ObjectRotation, RenderConfig, ViewpointConfig,
 };
 use std::path::PathBuf;
 
@@ -43,8 +43,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Backend configuration:");
     println!("  Selected: {}", selected_backend.name());
-    println!("  Fallbacks: {:?}",
-        backend_config.fallbacks.iter().map(|b| b.name()).collect::<Vec<_>>()
+    println!(
+        "  Fallbacks: {:?}",
+        backend_config
+            .fallbacks
+            .iter()
+            .map(|b| b.name())
+            .collect::<Vec<_>>()
     );
     println!("  Force headless: {}", backend_config.force_headless);
     println!();
@@ -71,7 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let viewpoints = bevy_sensor::generate_viewpoints(&viewpoint_config);
 
     println!("Rendering configuration:");
-    println!("  Resolution: {}x{}", render_config.width, render_config.height);
+    println!(
+        "  Resolution: {}x{}",
+        render_config.width, render_config.height
+    );
     println!("  Viewpoints: {}", viewpoints.len());
     println!("  Object: 003_cracker_box\n");
 
@@ -89,7 +97,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Output information:");
     println!("  Image size: {}x{} pixels", output.width, output.height);
     println!("  RGBA data: {} bytes", output.rgba.len());
-    println!("  Depth data: {} values ({} bytes)",
+    println!(
+        "  Depth data: {} values ({} bytes)",
         output.depth.len(),
         output.depth.len() * 8
     );
@@ -97,10 +106,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Show camera intrinsics (high precision with f64)
     let intrinsics = &output.intrinsics;
     println!("\nCamera intrinsics:");
-    println!("  Focal length: [{:.2}, {:.2}]",
+    println!(
+        "  Focal length: [{:.2}, {:.2}]",
         intrinsics.focal_length[0], intrinsics.focal_length[1]
     );
-    println!("  Principal point: [{:.2}, {:.2}]",
+    println!(
+        "  Principal point: [{:.2}, {:.2}]",
         intrinsics.principal_point[0], intrinsics.principal_point[1]
     );
 
@@ -108,8 +119,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rgb_image = output.to_rgb_image();
     let depth_image = output.to_depth_image();
     println!("\nImage format conversions:");
-    println!("  RGB image: {}x{} pixels", rgb_image.len(), rgb_image[0].len());
-    println!("  Depth image: {}x{} floats", depth_image.len(), depth_image[0].len());
+    println!(
+        "  RGB image: {}x{} pixels",
+        rgb_image.len(),
+        rgb_image[0].len()
+    );
+    println!(
+        "  Depth image: {}x{} floats",
+        depth_image.len(),
+        depth_image[0].len()
+    );
 
     println!("\n✓ WebGPU rendering example complete!");
     println!("\nTo render multiple viewpoints efficiently, see examples/batch_render_neocortx.rs");

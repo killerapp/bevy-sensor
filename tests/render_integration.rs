@@ -17,8 +17,8 @@
 //! - Depth buffer readback works
 
 use bevy_sensor::{
-    backend::detect_platform,
-    render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation, RenderOutput,
+    backend::detect_platform, render_to_buffer, ObjectRotation, RenderConfig, RenderOutput,
+    ViewpointConfig,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -40,9 +40,7 @@ fn save_render_output(output: &RenderOutput, name: &str) -> Result<(), Box<dyn s
 
     // Save depth as binary f64
     let depth_path = render_dir.join(format!("{}.depth", name));
-    let depth_bytes: Vec<u8> = output.depth.iter()
-        .flat_map(|&d| d.to_le_bytes())
-        .collect();
+    let depth_bytes: Vec<u8> = output.depth.iter().flat_map(|&d| d.to_le_bytes()).collect();
     fs::write(&depth_path, &depth_bytes)?;
     println!("  Saved depth: {}", depth_path.display());
 
@@ -79,31 +77,30 @@ fn test_render_integration() {
         &viewpoints[0],
         &ObjectRotation::identity(),
         &config,
-    ).expect("Render failed - GPU/backend unavailable or rendering not supported");
+    )
+    .expect("Render failed - GPU/backend unavailable or rendering not supported");
 
     // Validate RGBA output
-    assert_eq!(
-        output.width, config.width,
-        "Output width mismatch"
-    );
-    assert_eq!(
-        output.height, config.height,
-        "Output height mismatch"
-    );
+    assert_eq!(output.width, config.width, "Output width mismatch");
+    assert_eq!(output.height, config.height, "Output height mismatch");
 
     let expected_rgba_size = (config.width * config.height * 4) as usize;
     assert_eq!(
-        output.rgba.len(), expected_rgba_size,
+        output.rgba.len(),
+        expected_rgba_size,
         "RGBA buffer size mismatch: expected {} bytes, got {}",
-        expected_rgba_size, output.rgba.len()
+        expected_rgba_size,
+        output.rgba.len()
     );
 
     // Validate depth output
     let expected_depth_size = (config.width * config.height) as usize;
     assert_eq!(
-        output.depth.len(), expected_depth_size,
+        output.depth.len(),
+        expected_depth_size,
         "Depth buffer size mismatch: expected {} values, got {}",
-        expected_depth_size, output.depth.len()
+        expected_depth_size,
+        output.depth.len()
     );
 
     // Sanity check: depth values should be reasonable (between 0.1 and 10 meters typically)
@@ -130,14 +127,26 @@ fn test_render_integration() {
     let intrinsics = &output.intrinsics;
     assert!(intrinsics.focal_length[0] > 0.0, "Invalid focal length X");
     assert!(intrinsics.focal_length[1] > 0.0, "Invalid focal length Y");
-    assert!(intrinsics.principal_point[0] >= 0.0, "Invalid principal point X");
-    assert!(intrinsics.principal_point[1] >= 0.0, "Invalid principal point Y");
+    assert!(
+        intrinsics.principal_point[0] >= 0.0,
+        "Invalid principal point X"
+    );
+    assert!(
+        intrinsics.principal_point[1] >= 0.0,
+        "Invalid principal point Y"
+    );
 
     println!("✓ Render output valid!");
     println!("  RGBA: {} bytes", output.rgba.len());
-    println!("  Depth: {} values ({} bytes)", output.depth.len(), output.depth.len() * 8);
-    println!("  Focal length: [{:.2}, {:.2}]",
-        intrinsics.focal_length[0], intrinsics.focal_length[1]);
+    println!(
+        "  Depth: {} values ({} bytes)",
+        output.depth.len(),
+        output.depth.len() * 8
+    );
+    println!(
+        "  Focal length: [{:.2}, {:.2}]",
+        intrinsics.focal_length[0], intrinsics.focal_length[1]
+    );
 
     // Save render output for inspection
     if let Err(e) = save_render_output(&output, "test_render_basic") {
@@ -166,16 +175,15 @@ fn test_render_multiple_viewpoints() {
 
     // Render first 3 viewpoints to verify consistency
     for (i, viewpoint) in viewpoints.iter().take(3).enumerate() {
-        let output = render_to_buffer(
-            &object_dir,
-            viewpoint,
-            &ObjectRotation::identity(),
-            &config,
-        ).expect("Render failed");
+        let output = render_to_buffer(&object_dir, viewpoint, &ObjectRotation::identity(), &config)
+            .expect("Render failed");
 
         assert_eq!(output.width, config.width);
         assert_eq!(output.height, config.height);
-        assert_eq!(output.rgba.len(), (config.width * config.height * 4) as usize);
+        assert_eq!(
+            output.rgba.len(),
+            (config.width * config.height * 4) as usize
+        );
         assert_eq!(output.depth.len(), (config.width * config.height) as usize);
 
         // Save each viewpoint
@@ -209,12 +217,8 @@ fn test_render_with_rotation() {
     println!("Rendering with {} rotations...", rotations.len());
 
     for (rot_idx, rotation) in rotations.iter().enumerate() {
-        let output = render_to_buffer(
-            &object_dir,
-            &viewpoints[0],
-            rotation,
-            &config,
-        ).expect("Render with rotation failed");
+        let output = render_to_buffer(&object_dir, &viewpoints[0], rotation, &config)
+            .expect("Render with rotation failed");
 
         assert_eq!(output.width, config.width);
         assert_eq!(output.height, config.height);
@@ -224,8 +228,10 @@ fn test_render_with_rotation() {
             println!("    ⚠ Failed to save: {}", e);
         }
 
-        println!("  ✓ Rotation {} rendered successfully (yaw: {}°)",
-            rot_idx, rotation.yaw);
+        println!(
+            "  ✓ Rotation {} rendered successfully (yaw: {}°)",
+            rot_idx, rotation.yaw
+        );
     }
 
     println!("✓ Rotation test passed");

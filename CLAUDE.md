@@ -419,10 +419,12 @@ cargo run --example batch_render_neocortx --release
 
 ## Known Limitations
 
-1. **WSL2 GPU rendering** (IMPROVED):
-   - WSL2 does NOT support Vulkan window surfaces, even with WSLg display
-   - **Solution**: Use WebGPU backend (now automatic for WSL2)
-   - **Fallback**: Use pre-rendered fixtures for CI/CD (see below)
+1. **WSL2 GPU rendering** (PARTIALLY FIXED):
+   - WSL2 NOW has GPU access (nvidia-smi shows RTX 4090, CUDA 12.8 available)
+   - **Issue**: Bevy 0.15 GPU detection fails on WSL2 despite drivers being installed
+   - **Workaround**: Use pre-rendered fixtures for CI/CD (see below)
+   - **Note**: This is a Bevy + WSL2 compatibility issue, may be fixed in Bevy 0.16+
+   - **Solution for native Linux**: Integration tests work perfectly with GPU
 
 2. **Software rendering (llvmpipe)**:
    - Must disable tonemapping (`Tonemapping::None`) on the camera

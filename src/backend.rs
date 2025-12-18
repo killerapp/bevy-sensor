@@ -118,12 +118,13 @@ impl BackendConfig {
             ),
             Platform::Windows => (
                 Some(RenderBackend::DirectX12),
-                vec![RenderBackend::Vulkan, RenderBackend::OpenGL, RenderBackend::WebGPU],
+                vec![
+                    RenderBackend::Vulkan,
+                    RenderBackend::OpenGL,
+                    RenderBackend::WebGPU,
+                ],
             ),
-            Platform::Web => (
-                Some(RenderBackend::WebGPU),
-                vec![RenderBackend::WebGL2],
-            ),
+            Platform::Web => (Some(RenderBackend::WebGPU), vec![RenderBackend::WebGL2]),
             Platform::Unknown => (
                 Some(RenderBackend::Auto),
                 vec![RenderBackend::WebGPU, RenderBackend::OpenGL],
@@ -216,7 +217,12 @@ pub fn detect_platform() -> Platform {
         Platform::Web
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_arch = "wasm32")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    )))]
     {
         Platform::Unknown
     }
