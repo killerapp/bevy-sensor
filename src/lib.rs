@@ -145,6 +145,51 @@ pub mod ycb {
     }
 }
 
+/// Initialize bevy-sensor rendering backend configuration.
+///
+/// **IMPORTANT**: Call this function ONCE at the start of your application,
+/// before any rendering operations, especially when using bevy-sensor as a library.
+///
+/// This ensures proper backend selection (WebGPU for WSL2, Vulkan for Linux, etc.)
+/// and is critical for GPU rendering on WSL2 environments.
+///
+/// # Why This Matters
+///
+/// The WGPU rendering backend caches its backend selection early during initialization.
+/// When bevy-sensor is used as a library, environment variables must be set BEFORE
+/// any GPU rendering code runs. This function does that automatically.
+///
+/// # Example
+///
+/// ```ignore
+/// use bevy_sensor;
+///
+/// fn main() {
+///     // Initialize FIRST, before any rendering
+///     bevy_sensor::initialize();
+///
+///     // Now use the rendering API
+///     let output = bevy_sensor::render_to_buffer(
+///         object_dir, &viewpoint, &rotation, &config
+///     )?;
+/// }
+/// ```
+///
+/// # Calling Multiple Times
+///
+/// Safe to call multiple times - subsequent calls are no-ops after the first call.
+pub fn initialize() {
+    // Use a OnceCell equivalent to ensure this only runs once
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+    if !INITIALIZED.swap(true, Ordering::SeqCst) {
+        // First call - initialize backend
+        let config = backend::BackendConfig::new();
+        config.apply_env();
+    }
+}
+
 /// Object rotation in Euler angles (degrees), matching TBP benchmark format.
 /// Format: [pitch, yaw, roll] or [x, y, z] rotation.
 #[derive(Clone, Debug, PartialEq)]
