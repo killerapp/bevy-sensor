@@ -88,15 +88,23 @@ fn main() {
 
 /// Run a single render (subprocess mode)
 fn run_single_render(args: &[String]) {
-    let object_id = parse_arg(args, "--object").expect("--object required for single-render");
+    if let Err(e) = run_single_render_impl(args) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let object_id =
+        parse_arg(args, "--object").ok_or("Error: --object required for single-render")?;
     let rotation_idx: usize = parse_arg(args, "--rotation")
-        .expect("--rotation required")
+        .ok_or("Error: --rotation required")?
         .parse()
-        .expect("--rotation must be a number");
+        .map_err(|_| "Error: --rotation must be a valid number")?;
     let viewpoint_idx: usize = parse_arg(args, "--viewpoint")
-        .expect("--viewpoint required")
+        .ok_or("Error: --viewpoint required")?
         .parse()
-        .expect("--viewpoint must be a number");
+        .map_err(|_| "Error: --viewpoint must be a valid number")?;
     let output_dir =
         parse_arg(args, "--output").unwrap_or_else(|| "test_fixtures/renders".to_string());
 
@@ -113,31 +121,43 @@ fn run_single_render(args: &[String]) {
 
     // Create output directory
     let object_output = PathBuf::from(&output_dir).join(&object_id);
-    fs::create_dir_all(&object_output).expect("Failed to create output directory");
+    fs::create_dir_all(&object_output).map_err(|e| {
+        format!(
+            "Error: Failed to create output directory {}: {}",
+            object_output.display(),
+            e
+        )
+    })?;
 
     // Output paths
     let rgba_path = object_output.join(format!("r{}_v{:02}.png", rotation_idx, viewpoint_idx));
     let depth_path = object_output.join(format!("r{}_v{:02}.depth", rotation_idx, viewpoint_idx));
 
     // Render directly to files - this function will call process::exit() when done
-    let result = bevy_sensor::render_to_files(
+    bevy_sensor::render_to_files(
         &object_dir,
         viewpoint,
         rotation,
         &render_config,
         &rgba_path,
         &depth_path,
-    );
+    )
+    .map_err(|e| format!("Render failed: {}", e))?;
 
-    // Only reached on error (render_to_files calls process::exit on success)
-    if let Err(e) = result {
-        eprintln!("RENDER_ERROR: {:?}", e);
-        std::process::exit(1);
-    }
+    // If render succeeded, process::exit() was already called by render_to_files
+    // This line should not be reached
+    Ok(())
 }
 
 /// Run batch rendering (main mode)
 fn run_batch_render(args: &[String]) {
+    if let Err(e) = run_batch_render_impl(args) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let output_dir =
         parse_arg(args, "--output-dir").unwrap_or_else(|| "test_fixtures/renders".to_string());
     let objects_arg = parse_arg(args, "--objects");
@@ -159,13 +179,19 @@ fn run_batch_render(args: &[String]) {
         println!("Please download first:");
         println!("  cargo run --example test_render");
         println!("Or use ycbust directly.");
-        std::process::exit(1);
+        return Err("YCB models not found".into());
     }
     println!("YCB models found at {:?}", ycb_dir);
 
     // Create output directory
     let output_path = PathBuf::from(&output_dir);
-    fs::create_dir_all(&output_path).expect("Failed to create output directory");
+    fs::create_dir_all(&output_path).map_err(|e| {
+        format!(
+            "Failed to create output directory {}: {}",
+            output_path.display(),
+            e
+        )
+    })?;
 
     // Configuration
     let render_config = RenderConfig::tbp_default();
@@ -220,12 +246,20 @@ fn run_batch_render(args: &[String]) {
 
     // Save dataset metadata
     let metadata_path = output_path.join("metadata.json");
-    let metadata_json = serde_json::to_string_pretty(&metadata).unwrap();
-    fs::write(&metadata_path, &metadata_json).expect("Failed to write metadata");
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Failed to serialize metadata JSON: {}", e))?;
+    fs::write(&metadata_path, &metadata_json).map_err(|e| {
+        format!(
+            "Failed to write metadata to {}: {}",
+            metadata_path.display(),
+            e
+        )
+    })?;
     println!("\nSaved dataset metadata to {:?}", metadata_path);
 
     // Get the current executable path for subprocess spawning
-    let exe_path = std::env::current_exe().expect("Failed to get current executable path");
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to get current executable path: {}", e))?;
 
     // Render each object using subprocesses
     let mut all_render_metadata: HashMap<String, Vec<RenderMetadata>> = HashMap::new();
@@ -242,7 +276,13 @@ fn run_batch_render(args: &[String]) {
 
         // Create object output directory
         let object_output = output_path.join(object_id);
-        fs::create_dir_all(&object_output).expect("Failed to create object directory");
+        fs::create_dir_all(&object_output).map_err(|e| {
+            format!(
+                "Failed to create object directory {}: {}",
+                object_output.display(),
+                e
+            )
+        })?;
 
         let mut object_renders: Vec<RenderMetadata> = Vec::new();
         let mut render_count = 0;
@@ -307,8 +347,10 @@ fn run_batch_render(args: &[String]) {
 
         // Save object render index
         let index_path = object_output.join("index.json");
-        let index_json = serde_json::to_string_pretty(&object_renders).unwrap();
-        fs::write(&index_path, &index_json).expect("Failed to write index");
+        let index_json = serde_json::to_string_pretty(&object_renders)
+            .map_err(|e| format!("Failed to serialize object index JSON: {}", e))?;
+        fs::write(&index_path, &index_json)
+            .map_err(|e| format!("Failed to write index to {}: {}", index_path.display(), e))?;
         println!(
             "  Saved {} renders to {:?}",
             object_renders.len(),
@@ -325,6 +367,8 @@ fn run_batch_render(args: &[String]) {
     println!("Output directory: {:?}", output_path);
     println!("\nTo use in tests:");
     println!("  let fixtures = TestFixtures::load(\"test_fixtures/renders\");");
+
+    Ok(())
 }
 
 fn parse_arg(args: &[String], flag: &str) -> Option<String> {
