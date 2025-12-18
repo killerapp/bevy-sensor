@@ -66,7 +66,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{ObjectRotation, RenderConfig, RenderError, RenderOutput};
+use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput};
 
 /// Check if a display is available for windowed rendering.
 ///
@@ -1827,6 +1827,10 @@ pub fn render_to_files(
             std::thread::sleep(poll_interval);
         }
     });
+
+    // Configure rendering backend for this environment
+    let backend_config = BackendConfig::headless();
+    backend_config.apply_env();
 
     // Run Bevy app with HEADLESS configuration
     App::new()
