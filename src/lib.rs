@@ -64,6 +64,9 @@ pub mod batch;
 // WebGPU and cross-platform backend support
 pub mod backend;
 
+// Model caching system for efficient multi-viewpoint rendering
+pub mod cache;
+
 // Test fixtures for pre-rendered images (CI/CD support)
 pub mod fixtures;
 
@@ -742,6 +745,89 @@ pub fn render_all_viewpoints(
     }
 
     Ok(outputs)
+}
+
+/// Render with model caching support for efficient multi-viewpoint rendering.
+///
+/// This function tracks which models have been loaded and provides performance
+/// insights. For maximum efficiency when rendering many viewpoints of the same
+/// object, use the batch rendering API (`create_batch_renderer`, `render_batch`).
+///
+/// # Arguments
+/// * `object_dir` - Path to YCB object directory
+/// * `camera_transform` - Camera position and orientation
+/// * `object_rotation` - Rotation to apply to the object
+/// * `config` - Render configuration
+/// * `cache` - Model cache to track loaded assets
+///
+/// # Returns
+/// RenderOutput with rendered RGBA and depth data
+///
+/// # Example
+/// ```ignore
+/// use bevy_sensor::{render_to_buffer_cached, cache::ModelCache, RenderConfig, ObjectRotation};
+/// use std::path::PathBuf;
+///
+/// let mut cache = ModelCache::new();
+/// let object_dir = PathBuf::from("/tmp/ycb/003_cracker_box");
+/// let config = RenderConfig::tbp_default();
+/// let viewpoints = bevy_sensor::generate_viewpoints(&ViewpointConfig::default());
+///
+/// // First render: loads from disk and caches
+/// let output1 = render_to_buffer_cached(
+///     &object_dir,
+///     &viewpoints[0],
+///     &ObjectRotation::identity(),
+///     &config,
+///     &mut cache,
+/// )?;
+///
+/// // Subsequent renders: tracks in cache (actual speedup comes from batch API)
+/// for viewpoint in &viewpoints[1..] {
+///     let output = render_to_buffer_cached(
+///         &object_dir,
+///         viewpoint,
+///         &ObjectRotation::identity(),
+///         &config,
+///         &mut cache,
+///     )?;
+/// }
+/// ```
+///
+/// # Note
+/// This function uses the same rendering engine as `render_to_buffer()`. For true
+/// asset caching performance gains (2-3x speedup), combine with batch rendering:
+///
+/// ```ignore
+/// use bevy_sensor::{render_batch, batch::BatchRenderRequest, BatchRenderConfig, RenderConfig, ObjectRotation};
+///
+/// let requests: Vec<_> = viewpoints.iter().map(|vp| {
+///     BatchRenderRequest {
+///         object_dir: object_dir.clone(),
+///         viewpoint: *vp,
+///         object_rotation: ObjectRotation::identity(),
+///         render_config: RenderConfig::tbp_default(),
+///     }
+/// }).collect();
+///
+/// let outputs = render_batch(requests, &BatchRenderConfig::default())?;
+/// ```
+pub fn render_to_buffer_cached(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    config: &RenderConfig,
+    cache: &mut cache::ModelCache,
+) -> Result<RenderOutput, RenderError> {
+    let mesh_path = object_dir.join("google_16k/textured.obj");
+    let texture_path = object_dir.join("google_16k/texture_map.png");
+
+    // Track in cache
+    cache.cache_scene(mesh_path.clone());
+    cache.cache_texture(texture_path.clone());
+
+    // Render using standard pipeline
+    render::render_headless(object_dir, camera_transform, object_rotation, config)
 }
 
 /// Render directly to files (for subprocess mode).
