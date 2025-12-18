@@ -963,7 +963,8 @@ pub fn render_headless(
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Render timeout after 60 seconds");
+                eprintln!("Error: Render timeout after 60 seconds");
+                eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
                 std::process::exit(1);
             }
 
@@ -1818,7 +1819,8 @@ pub fn render_to_files(
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Render timeout after 60 seconds");
+                eprintln!("Error: Render timeout after 60 seconds");
+                eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
                 std::process::exit(1);
             }
 
