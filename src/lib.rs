@@ -846,8 +846,6 @@ pub fn render_next_in_batch(
         renderer.completed_results.push(batch_output.clone());
         renderer.renders_processed += 1;
         Ok(Some(batch_output))
-    } else if renderer.pending_requests.is_empty() && renderer.current_request.is_none() {
-        Ok(None)
     } else {
         Ok(None)
     }
@@ -884,11 +882,8 @@ pub fn render_batch(
 
     // Execute all and collect results
     let mut results = Vec::new();
-    loop {
-        match render_next_in_batch(&mut renderer, config.frame_timeout_ms)? {
-            Some(output) => results.push(output),
-            None => break,
-        }
+    while let Some(output) = render_next_in_batch(&mut renderer, config.frame_timeout_ms)? {
+        results.push(output);
     }
 
     Ok(results)

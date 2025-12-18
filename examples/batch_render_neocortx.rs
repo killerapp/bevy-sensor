@@ -58,14 +58,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Queue all renders
     let mut total_queued = 0;
-    for rotation_idx in 0..rotations.len() {
-        for viewpoint_idx in 0..viewpoints.len() {
+    for rotation in &rotations {
+        for viewpoint in &viewpoints {
             queue_render_request(
                 &mut renderer,
                 BatchRenderRequest {
                     object_dir: object_dir.clone(),
-                    viewpoint: viewpoints[viewpoint_idx],
-                    object_rotation: rotations[rotation_idx].clone(),
+                    viewpoint: *viewpoint,
+                    object_rotation: rotation.clone(),
                     render_config: render_config.clone(),
                 },
             )?;
@@ -90,35 +90,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_rgba_size = 0;
     let mut max_depth_size = 0;
 
-    loop {
-        match render_next_in_batch(&mut renderer, 500)? {
-            Some(output) => {
-                // Update statistics
-                match output.status {
-                    RenderStatus::Success => {
-                        success_count += 1;
-                    }
-                    RenderStatus::PartialFailure => {
-                        partial_count += 1;
-                    }
-                    RenderStatus::Failed => {
-                        failure_count += 1;
-                    }
-                }
-
-                max_rgba_size = max_rgba_size.max(output.rgba.len());
-                max_depth_size = max_depth_size.max(output.depth.len());
-
-                // Progress indicator
-                let total = success_count + partial_count + failure_count;
-                if total % 8 == 0 {
-                    print!(".");
-                    if total % 72 == 0 {
-                        println!(" {} / {}", total, total_queued);
-                    }
-                }
+    while let Some(output) = render_next_in_batch(&mut renderer, 500)? {
+        // Update statistics
+        match output.status {
+            RenderStatus::Success => {
+                success_count += 1;
             }
-            None => break, // All renders complete
+            RenderStatus::PartialFailure => {
+                partial_count += 1;
+            }
+            RenderStatus::Failed => {
+                failure_count += 1;
+            }
+        }
+
+        max_rgba_size = max_rgba_size.max(output.rgba.len());
+        max_depth_size = max_depth_size.max(output.depth.len());
+
+        // Progress indicator
+        let total = success_count + partial_count + failure_count;
+        if total % 8 == 0 {
+            print!(".");
+            if total % 72 == 0 {
+                println!(" {} / {}", total, total_queued);
+            }
         }
     }
 

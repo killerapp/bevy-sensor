@@ -323,8 +323,10 @@ mod tests {
 
     #[test]
     fn test_queue_full() {
-        let mut config = BatchRenderConfig::default();
-        config.max_batch_size = 1;
+        let config = BatchRenderConfig {
+            max_batch_size: 1,
+            ..BatchRenderConfig::default()
+        };
         let mut renderer = BatchRenderer::new(config);
 
         let request = BatchRenderRequest {
