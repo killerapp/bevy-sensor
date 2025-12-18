@@ -4,8 +4,11 @@
 //! It's ignored by default (CI doesn't run it) but can be run locally with:
 //!
 //! ```sh
-//! cargo test -- --ignored --test render_integration
+//! cargo test -- --ignored --test render_integration -- --nocapture
+//! just test-render-integration  # or use justfile command
 //! ```
+//!
+//! Renders are saved to `test_fixtures/test_renders/` so you can inspect output.
 //!
 //! This validates:
 //! - GPU/rendering backend availability
@@ -15,9 +18,36 @@
 
 use bevy_sensor::{
     backend::detect_platform,
-    render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation,
+    render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation, RenderOutput,
 };
+use std::fs;
 use std::path::PathBuf;
+
+/// Save render output to test_fixtures/test_renders for inspection
+fn save_render_output(output: &RenderOutput, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let render_dir = PathBuf::from("test_fixtures/test_renders");
+    fs::create_dir_all(&render_dir)?;
+
+    // Save RGBA as PNG
+    let rgb_image = output.to_rgb_image();
+    let img = image::ImageBuffer::from_fn(output.width, output.height, |x, y| {
+        let rgb = rgb_image[y as usize][x as usize];
+        image::Rgb(rgb)
+    });
+    let rgba_path = render_dir.join(format!("{}.png", name));
+    img.save(&rgba_path)?;
+    println!("  Saved RGBA: {}", rgba_path.display());
+
+    // Save depth as binary f64
+    let depth_path = render_dir.join(format!("{}.depth", name));
+    let depth_bytes: Vec<u8> = output.depth.iter()
+        .flat_map(|&d| d.to_le_bytes())
+        .collect();
+    fs::write(&depth_path, &depth_bytes)?;
+    println!("  Saved depth: {}", depth_path.display());
+
+    Ok(())
+}
 
 #[test]
 #[ignore] // Skip in CI - run manually to verify rendering works
@@ -108,6 +138,12 @@ fn test_render_integration() {
     println!("  Depth: {} values ({} bytes)", output.depth.len(), output.depth.len() * 8);
     println!("  Focal length: [{:.2}, {:.2}]",
         intrinsics.focal_length[0], intrinsics.focal_length[1]);
+
+    // Save render output for inspection
+    if let Err(e) = save_render_output(&output, "test_render_basic") {
+        println!("⚠ Failed to save render output: {}", e);
+    }
+
     println!("✓ Integration test passed");
 }
 
@@ -141,6 +177,11 @@ fn test_render_multiple_viewpoints() {
         assert_eq!(output.height, config.height);
         assert_eq!(output.rgba.len(), (config.width * config.height * 4) as usize);
         assert_eq!(output.depth.len(), (config.width * config.height) as usize);
+
+        // Save each viewpoint
+        if let Err(e) = save_render_output(&output, &format!("test_viewpoint_{}", i)) {
+            println!("    ⚠ Failed to save: {}", e);
+        }
 
         println!("  ✓ Viewpoint {} rendered successfully", i);
     }
@@ -177,6 +218,12 @@ fn test_render_with_rotation() {
 
         assert_eq!(output.width, config.width);
         assert_eq!(output.height, config.height);
+
+        // Save each rotation
+        if let Err(e) = save_render_output(&output, &format!("test_rotation_{}", rot_idx)) {
+            println!("    ⚠ Failed to save: {}", e);
+        }
+
         println!("  ✓ Rotation {} rendered successfully (yaw: {}°)",
             rot_idx, rotation.yaw);
     }
