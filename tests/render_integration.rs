@@ -352,10 +352,10 @@ fn test_cache_with_multiple_viewpoints() {
     println!("Rendering {} viewpoints with cache...", render_count);
 
     let mut outputs = Vec::new();
-    for i in 0..render_count {
+    for (i, viewpoint) in viewpoints.iter().take(render_count).enumerate() {
         let output = render_to_buffer_cached(
             &object_dir,
-            &viewpoints[i],
+            viewpoint,
             &ObjectRotation::identity(),
             &config,
             &mut cache,
