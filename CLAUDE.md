@@ -558,6 +558,8 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) f
    - GitHub release
    - crates.io publish (if configured)
 
+**Note:** Git tags are created asynchronously by GitHub Actions (30-60 seconds). Don't repeatedly `git fetch` after merging the release PR—the tag will be available once the workflow completes. Check status with `gh run list --workflow CI`.
+
 ### Breaking Changes
 
 When making breaking API changes (like f32 → f64 migration):
