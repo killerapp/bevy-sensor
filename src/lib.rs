@@ -621,17 +621,31 @@ impl RenderOutput {
     }
 }
 
-/// Errors that can occur during rendering.
+/// Errors that can occur during rendering and file operations.
 #[derive(Debug, Clone)]
 pub enum RenderError {
     /// Object mesh file not found
     MeshNotFound(String),
     /// Object texture file not found
     TextureNotFound(String),
+    /// Generic file not found error
+    FileNotFound { path: String, reason: String },
+    /// File write failed
+    FileWriteFailed { path: String, reason: String },
+    /// Directory creation failed
+    DirectoryCreationFailed { path: String, reason: String },
     /// Bevy rendering failed
     RenderFailed(String),
     /// Invalid configuration
     InvalidConfig(String),
+    /// Invalid input parameters
+    InvalidInput(String),
+    /// JSON serialization/deserialization error
+    SerializationError(String),
+    /// Binary data parsing error
+    DataParsingError(String),
+    /// Render timeout
+    RenderTimeout { duration_secs: u64 },
 }
 
 impl std::fmt::Display for RenderError {
@@ -639,8 +653,23 @@ impl std::fmt::Display for RenderError {
         match self {
             RenderError::MeshNotFound(path) => write!(f, "Mesh not found: {}", path),
             RenderError::TextureNotFound(path) => write!(f, "Texture not found: {}", path),
+            RenderError::FileNotFound { path, reason } => {
+                write!(f, "File not found at {}: {}", path, reason)
+            }
+            RenderError::FileWriteFailed { path, reason } => {
+                write!(f, "Failed to write file {}: {}", path, reason)
+            }
+            RenderError::DirectoryCreationFailed { path, reason } => {
+                write!(f, "Failed to create directory {}: {}", path, reason)
+            }
             RenderError::RenderFailed(msg) => write!(f, "Render failed: {}", msg),
             RenderError::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
+            RenderError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            RenderError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+            RenderError::DataParsingError(msg) => write!(f, "Data parsing error: {}", msg),
+            RenderError::RenderTimeout { duration_secs } => {
+                write!(f, "Render timeout after {} seconds", duration_secs)
+            }
         }
     }
 }
