@@ -51,6 +51,15 @@ test-verbose:
 test-lib:
     WGPU_BACKEND=vulkan cargo test --lib -- --test-threads=1
 
+# Run rendering integration tests (hardware test - uses GPU)
+# Generates test renders in test_fixtures/test_renders/
+test-render-integration:
+    cargo test -- --ignored --test render_integration -- --nocapture
+
+# Run integration tests with WebGPU backend explicitly
+test-render-webgpu:
+    WGPU_BACKEND=webgpu cargo test -- --ignored --test render_integration -- --nocapture
+
 # ============================================================================
 # Render Commands - Headless GPU rendering on WSL2/Linux
 # ============================================================================
@@ -83,9 +92,19 @@ render-tbp-benchmark:
 render-to dir objects="003_cracker_box":
     cargo run --bin prerender -- --output-dir {{dir}} --objects {{objects}}
 
-# Clean render output directory
+# Clean render output directory (pre-rendered fixtures)
 clean-renders:
     rm -rf test_fixtures/renders
+
+# Clean test render outputs from integration tests
+clean-test-renders:
+    rm -rf test_fixtures/test_renders
+
+# Regenerate test renders via integration tests
+regenerate-test-renders: test-render-integration
+    @echo ""
+    @echo "✓ Test renders regenerated in test_fixtures/test_renders/"
+    @ls -lh test_fixtures/test_renders/ 2>/dev/null || echo "No renders saved"
 
 # ============================================================================
 # YCB Dataset Commands
