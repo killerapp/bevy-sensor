@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/killerapp/bevy-sensor/compare/v0.4.1...v0.4.2) - 2025-12-18
+
+### Added
+
+- add model caching system for efficient multi-viewpoint rendering ([#25](https://github.com/killerapp/bevy-sensor/pull/25))
+- Add WebGPU backend support for cross-platform rendering
+
+### Other
+
+- Merge pull request #22 from killerapp/release-plz-2025-12-18T07-56-05Z
+- Update WSL2 GPU limitation - now has CUDA access but Bevy 0.15 can't detect it
+- Add render output saving to integration tests and justfile commands
+- Add hardware rendering integration tests
+- Add WebGPU backend usage example
+
 ## [0.4.1](https://github.com/killerapp/bevy-sensor/compare/v0.4.0...v0.4.1) - 2025-12-18
 
 ### Other
