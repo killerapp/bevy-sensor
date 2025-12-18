@@ -373,12 +373,56 @@ The upgrade from Bevy 0.11 to 0.15 enabled real GPU depth buffer readback:
 - Custom render graph node (`DepthReadbackNode`) copies depth after main pass
 - 256-byte row alignment for GPU buffer mapping
 
+## WebGPU Backend Support
+
+bevy-sensor now includes automatic cross-platform rendering backend selection via the `backend` module:
+
+### Automatic Platform Detection
+- **Linux**: Vulkan (primary), OpenGL (fallback), WebGPU (as-needed)
+- **WSL2**: WebGPU (primary - recommended for WSL2), OpenGL (fallback)
+- **macOS**: Metal (primary), OpenGL (fallback)
+- **Windows**: Direct3D 12 (primary), Vulkan (fallback), WebGPU (as-needed)
+
+### Using WebGPU Backend
+```rust
+use bevy_sensor::backend::{BackendConfig, RenderBackend};
+
+// Use WebGPU explicitly for maximum compatibility
+let config = BackendConfig {
+    preferred: Some(RenderBackend::WebGPU),
+    fallbacks: vec![RenderBackend::OpenGL],
+    debug_logging: false,
+    force_headless: true,
+};
+config.apply_env();
+
+// Now run your render functions - they'll use WebGPU
+```
+
+### Environment Variable Override
+```bash
+# Force WebGPU backend
+export WGPU_BACKEND=webgpu
+cargo run --release
+
+# Other options: vulkan, metal, dx12, gl, webgpu, webgl2, auto
+```
+
+### WSL2 Optimization
+WSL2 environments now default to WebGPU backend (previously required pre-rendered fixtures):
+```bash
+# This now works on WSL2 (auto-selects WebGPU)
+cargo run --example batch_render_neocortx --release
+```
+
+**Note**: WebGPU backend may have slightly lower performance than native backends but offers excellent compatibility across platforms.
+
 ## Known Limitations
 
-1. **WSL2 GPU rendering** (CRITICAL):
+1. **WSL2 GPU rendering** (IMPROVED):
    - WSL2 does NOT support Vulkan window surfaces, even with WSLg display
-   - `render_to_buffer()` will fail with "Invalid surface" error on WSL2
-   - **Solution**: Use pre-rendered fixtures for CI/CD (see below)
+   - **Solution**: Use WebGPU backend (now automatic for WSL2)
+   - **Fallback**: Use pre-rendered fixtures for CI/CD (see below)
 
 2. **Software rendering (llvmpipe)**:
    - Must disable tonemapping (`Tonemapping::None`) on the camera

@@ -28,6 +28,7 @@ bevy = { version = "0.15", default-features = false, features = [
     "ktx2",            # Required for some textures
     "zstd",            # Compression for ktx2
 ] }
+wgpu = { version = "0.20", features = ["webgpu"] }  # For explicit backend selection
 bevy_obj = { version = "0.15", features = ["scene"] }
 ycbust = "0.2.4"
 image = "0.25"  # For saving PNG/depth images

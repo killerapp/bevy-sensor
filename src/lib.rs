@@ -61,6 +61,9 @@ mod render;
 // Batch rendering API for efficient multi-viewpoint rendering
 pub mod batch;
 
+// WebGPU and cross-platform backend support
+pub mod backend;
+
 // Test fixtures for pre-rendered images (CI/CD support)
 pub mod fixtures;
 
