@@ -121,6 +121,40 @@ let point = intrinsics.unproject([32.0, 32.0], depth);  // [f64; 3]
 > **Note:** Full GPU rendering requires a display (X11/Wayland). The depth buffer
 > now returns real per-pixel depth values from GPU readback (Bevy 0.15+).
 
+### Library Usage: GPU Rendering on WSL2
+
+When using bevy-sensor as a library (e.g., from neocortx), you **MUST** call `bevy_sensor::initialize()` at the start of your application, before any rendering operations:
+
+```rust
+use bevy_sensor;
+
+fn main() {
+    // Initialize backend configuration FIRST
+    // This is critical for WSL2 GPU rendering!
+    bevy_sensor::initialize();
+
+    // Now use the rendering API
+    let output = bevy_sensor::render_to_buffer(
+        object_dir,
+        &viewpoint,
+        &rotation,
+        &RenderConfig::tbp_default(),
+    )?;
+}
+```
+
+**Why is this necessary?**
+
+The WGPU rendering backend caches its backend selection early during library initialization. On WSL2, this must be WebGPU (not Vulkan, which doesn't support headless rendering). Calling `initialize()` ensures environment variables are set before any GPU code runs.
+
+**Symptoms of skipping this step:**
+- WSL2: Panic "Unable to find a GPU" when trying to render
+- Incorrect backend selection causing GPU access failures
+- Library mode fails while binary mode works (different initialization order)
+
+**On neocortx integration:**
+Call `initialize()` in the `BevySensorModule::new()` function or in main before creating the module.
+
 ### Object Rotation (`ObjectRotation`)
 
 Matches TBP benchmark Euler angle format `[pitch, yaw, roll]`:
