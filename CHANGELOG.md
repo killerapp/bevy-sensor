@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/killerapp/bevy-sensor/compare/v0.4.2...v0.4.3) - 2025-12-18
+
+### Fixed
+
+- add initialize() function to ensure GPU backend config before WGPU caching ([#27](https://github.com/killerapp/bevy-sensor/pull/27))
+
 ## [0.4.2](https://github.com/killerapp/bevy-sensor/compare/v0.4.1...v0.4.2) - 2025-12-18
 
 ### Added
