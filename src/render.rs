@@ -50,7 +50,8 @@ use bevy::render::render_graph::{
 };
 use bevy::render::render_resource::{
     Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, ImageCopyBuffer,
-    ImageDataLayout, MapMode, TextureDimension, TextureFormat, TextureUsages,
+    ImageCopyTexture, ImageDataLayout, MapMode, Origin3d, TextureAspect, TextureDimension,
+    TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
@@ -403,8 +404,8 @@ impl ViewNode for DepthReadbackNode {
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
-        _render_context: &mut RenderContext<'w>,
-        (_view_depth_texture, camera): QueryItem<'w, Self::ViewQuery>,
+        render_context: &mut RenderContext<'w>,
+        (view_depth_texture, camera): QueryItem<'w, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         // Check if depth capture is requested
@@ -443,13 +444,29 @@ impl ViewNode for DepthReadbackNode {
             mapped_at_creation: false,
         });
 
-        // TODO: Depth texture to buffer copying needs to be reimplemented for Bevy 0.16
-        // The low-level wgpu ImageCopy types are not directly exposed in this Bevy version
-        // For now, we'll skip depth copying and focus on RGBA rendering
-        // This functionality can be restored once Bevy 0.16's depth readback API is clarified
-
-        // let encoder = render_context.command_encoder();
-        // encoder.copy_texture_to_buffer(...)
+        // Copy depth texture to staging buffer
+        let encoder = render_context.command_encoder();
+        encoder.copy_texture_to_buffer(
+            ImageCopyTexture {
+                texture: &view_depth_texture.texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::DepthOnly,
+            },
+            ImageCopyBuffer {
+                buffer: &staging_buffer,
+                layout: ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
 
         // Push to queue for async processing (queue is Arc<Mutex<Vec>>)
         if let Ok(mut pending) = queue.0.lock() {
