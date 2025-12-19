@@ -10,7 +10,7 @@ A Bevy library and CLI that captures multi-view images of 3D OBJ models (YCB dat
 # Build
 cargo build --release
 
-# Run tests (69 tests)
+# Run tests (80 tests)
 cargo test
 
 # Run (requires GPU or proper software rendering)
@@ -451,14 +451,59 @@ cargo run --example batch_render_neocortx --release
 
 **Note**: WebGPU backend may have slightly lower performance than native backends but offers excellent compatibility across platforms.
 
+### Bevy 0.16 Upgrade (December 2024, In Progress)
+
+Migrating from Bevy 0.15 to 0.16 for improved GPU detection on WSL2 and broader platform compatibility.
+
+**Migration Status:**
+- ✅ Updated all Bevy 0.15 → 0.16 API changes (80 tests passing)
+- ✅ Fixed AmbientLight `affects_lightmapped_meshes` field requirement
+- ✅ Fixed `EventWriter::send()` → `write()` API change
+- ✅ Fixed deprecated `Query::get_single_mut()` → `single_mut()`
+- ✅ Fixed `Image` texture_descriptor API changes
+- ✅ Replaced logging macros (bevy::log removed in 0.16)
+- ✅ Fixed `RenderTarget::Image` type changes
+- ⚠️ **TODO**: Re-implement depth texture readback (currently commented out)
+
+**Breaking Changes in Bevy 0.16:**
+- `bevy::log` module removed - using standard Rust println!/eprintln! instead
+- Low-level `ImageCopyBuffer`, `ImageCopyTexture`, `ImageDataLayout` wgpu types no longer re-exported
+- Depth texture to buffer copying needs new implementation
+- Various ECS query result-based error handling (Result instead of panic)
+
+**What Changed:**
+- Image::texture_descriptor now required instead of direct field access
+- Camera target type changed to `ImageRenderTarget` wrapper
+- Screenshot capture now uses `Screenshot` entity + observer pattern (already in 0.15)
+- Logging now uses standard Rust log crate facilities
+
+**Known Issues:**
+- **Depth Map Re-implementation Required**: The custom depth texture readback code (DepthReadbackNode, ImageCopyDriver) has been commented out because the low-level wgpu ImageCopy types are not directly accessible in Bevy 0.16. The rendering still works for RGBA/RGB, but depth buffers currently return zeros. This must be fixed before merging to main.
+  - Location: `src/render.rs` lines 445-451 and 691-700
+  - Alternative approaches to investigate:
+    1. Use Bevy's built-in depth texture readback if available in 0.16
+    2. Create a custom render node using the wgpu API through Bevy's RenderContext
+    3. Use a different approach like normal maps or indirect depth estimation
+
+**Testing Status:**
+- All 80 unit tests pass ✅
+- Compilation: ✅ Release build successful
+- GPU rendering on WSL2: ❌ **Still fails** - wgpu adapter enumeration fails despite GPU being present (nvidia-smi shows RTX 4090, CUDA 12.8)
+  - Error: "Unable to find a GPU!" panic in `bevy_render-0.16.1/src/renderer/mod.rs:197`
+  - Root cause: WSL2 wgpu limitation, not Bevy 0.16 specific
+  - **Status**: This is a framework-level issue beyond bevy-sensor's control
+  - **Confirmed**: GPU drivers and CUDA are properly installed and functional
+
 ## Known Limitations
 
-1. **WSL2 GPU rendering** (PARTIALLY FIXED):
-   - WSL2 NOW has GPU access (nvidia-smi shows RTX 4090, CUDA 12.8 available)
-   - **Issue**: Bevy 0.15 GPU detection fails on WSL2 despite drivers being installed
+1. **WSL2 GPU rendering** (NOT FIXED - Framework Limitation):
+   - ✅ GPU is available: RTX 4090 with 23GB, CUDA 12.8, drivers 572.16
+   - ❌ **Issue**: wgpu adapter enumeration fails on WSL2 even with GPU present
+   - **Root cause**: WSL2 + wgpu + NVIDIA compatibility limitation (not specific to Bevy)
+   - **Tested**: Bevy 0.15 and 0.16 both fail with same error
    - **Workaround**: Use pre-rendered fixtures for CI/CD (see below)
-   - **Note**: This is a Bevy + WSL2 compatibility issue, may be fixed in Bevy 0.16+
    - **Solution for native Linux**: Integration tests work perfectly with GPU
+   - **Recommendation**: For production WSL2 use, run neocortx on native Linux with GPU passthrough
 
 2. **Software rendering (llvmpipe)**:
    - Must disable tonemapping (`Tonemapping::None`) on the camera
