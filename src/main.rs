@@ -298,12 +298,11 @@ fn capture_sequence(
                 return;
             }
 
-            if let Ok(mut transform) = camera_query.get_single_mut() {
-                *transform = viewpoints.0[state.view_index];
-                println!("Moved to view {}", state.view_index);
-                state.frame_counter = 0;
-                state.step = CaptureStep::WaitSettle;
-            }
+            let mut transform = camera_query.single_mut();
+            *transform = viewpoints.0[state.view_index];
+            println!("Moved to view {}", state.view_index);
+            state.frame_counter = 0;
+            state.step = CaptureStep::WaitSettle;
         }
         CaptureStep::WaitSettle => {
             state.frame_counter += 1;
