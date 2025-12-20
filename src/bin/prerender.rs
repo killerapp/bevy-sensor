@@ -200,7 +200,7 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     if !ycb::models_exist(&ycb_dir) {
         println!("\nYCB models not found at {:?}", ycb_dir);
         println!("Downloading representative models...");
-        
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         if let Err(e) = rt.block_on(ycb::download_models(&ycb_dir, ycb::Subset::Representative)) {
             eprintln!("Failed to download models: {}", e);
@@ -208,7 +208,7 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         }
         println!("Download complete.");
     }
-    
+
     // Canonicalize to ensure absolute path for Bevy asset loading
     let ycb_dir = fs::canonicalize(&ycb_dir).unwrap_or(ycb_dir);
     println!("YCB models found at {:?}", ycb_dir);
