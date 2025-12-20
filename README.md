@@ -28,7 +28,8 @@ This crate serves as the visual sensor module for the [neocortx](https://github.
 2.  **Run a Test Render:**
     ```bash
     just render-single 003_cracker_box
-    # Models will be automatically downloaded to /tmp/ycb if missing
+    # Models will be automatically downloaded to /tmp/ycb if missing.
+    # To use a custom location: cargo run --bin prerender -- --data-dir ./my_models ...
     # Output saved to test_fixtures/renders/
     ```
 
