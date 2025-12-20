@@ -10,6 +10,9 @@ use std::path::Path;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Initialize backend for proper GPU detection
+    bevy_sensor::initialize();
+
     let ycb_dir = "/tmp/ycb";
 
     // Download if needed
