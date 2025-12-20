@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6](https://github.com/killerapp/bevy-sensor/compare/v0.4.5...v0.4.6) - 2025-12-20
+
+### Added
+
+- auto-download YCB models in single render mode
+- automated YCB management and alpha release preparation
+
+### Fixed
+
+- cargo fmt
+
+### Other
+
+- Merge main into prepare-alpha-release, resolve CHANGELOG conflict
+
 ### Added
 - Automated YCB model downloading in `prerender` single-render mode when models are missing.
 - Canonicalize paths for reliable Bevy asset loading.
