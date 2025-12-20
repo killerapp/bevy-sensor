@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Automated YCB model downloading in `prerender` single-render mode when models are missing.
+- Canonicalize paths for reliable Bevy asset loading.
+
+### Changed
+- Updated `README.md` and `GEMINI.md` to document `--data-dir` option.
+
 ## [0.4.5](https://github.com/killerapp/bevy-sensor/compare/v0.4.4...v0.4.5) - 2025-12-20
 
 ### Fixed
