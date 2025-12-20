@@ -49,7 +49,8 @@ just test-render-integration # Run GPU-dependent integration tests
 ### Running (CLI)
 ```bash
 # Render default CI objects (cracker box, soup can)
-# Models will be automatically downloaded to /tmp/ycb if missing
+# Models are automatically downloaded to /tmp/ycb if missing.
+# Use --data-dir <path> to override this default.
 just render-ci
 
 # Render specific objects
