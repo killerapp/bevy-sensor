@@ -62,7 +62,7 @@ use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_obj::ObjPlugin;
 use std::fs::File;
-use std::io::{Read as IoRead, Write as IoWrite};
+use std::io::Read as IoRead;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -796,9 +796,17 @@ fn collect_image_captures(
             let _ = tx.send(result);
         });
 
-        // Poll the device until mapping completes
+        // Poll the device until mapping completes (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
         loop {
             render_device.poll(bevy::render::render_resource::Maintain::Poll);
+
+            if start.elapsed() > timeout {
+                eprintln!("Warning: Buffer mapping timeout after {:?}", start.elapsed());
+                break;
+            }
+
             match rx.try_recv() {
                 Ok(Ok(())) => {
                     let data = buffer_slice.get_mapped_range();
@@ -944,7 +952,6 @@ pub fn render_headless(
 
     let shared_output: SharedOutput = SharedOutput(Arc::new(Mutex::new(None)));
     let output_clone = shared_output.clone();
-    let output_poll = shared_output.clone();
 
     // Shared buffer for RGBA data from headless render target
     let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
@@ -954,12 +961,12 @@ pub fn render_headless(
     let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
     let depth_clone = shared_depth.clone();
 
-    // Create a temp file path for output serialization
+    // Create a temp file path for fallback output serialization
     let temp_path =
         std::env::temp_dir().join(format!("bevy_sensor_render_{}.bin", std::process::id()));
-    let temp_path_clone = temp_path.clone();
 
-    // Spawn watchdog thread that monitors for results and exits process when ready
+    // Spawn watchdog thread that monitors for timeout (don't exit - let Bevy exit gracefully)
+    let output_poll_for_timeout = shared_output.clone();
     std::thread::spawn(move || {
         let timeout = std::time::Duration::from_secs(60);
         let start = std::time::Instant::now();
@@ -967,23 +974,17 @@ pub fn render_headless(
 
         loop {
             // Check if we have a result
-            if let Ok(guard) = output_poll.0.lock() {
-                if let Some(output) = guard.as_ref() {
-                    // Serialize output to temp file
-                    let data = serialize_output(output);
-                    if let Ok(mut file) = File::create(&temp_path_clone) {
-                        let _ = file.write_all(&data);
-                    }
-                    // Give a moment for file to flush
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    // Exit the process - App::run() won't return otherwise
-                    std::process::exit(0);
+            if let Ok(guard) = output_poll_for_timeout.0.lock() {
+                if guard.is_some() {
+                    // Output is ready, Bevy will exit via AppExit event
+                    return; // Exit watchdog thread, Bevy will handle exit
                 }
             }
 
             if start.elapsed() > timeout {
                 eprintln!("Error: Render timeout after 60 seconds");
                 eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
+                // Force exit on timeout (this is a failure case)
                 std::process::exit(1);
             }
 
@@ -1033,7 +1034,14 @@ pub fn render_headless(
         )
         .run();
 
-    // If we get here, try to read from temp file (unlikely since watchdog exits)
+    // App::run() returned - check shared_output for result
+    if let Ok(guard) = shared_output.0.lock() {
+        if let Some(output) = guard.as_ref() {
+            return Ok(output.clone());
+        }
+    }
+
+    // Fallback: try to read from temp file (for legacy compatibility)
     if temp_path.exists() {
         if let Ok(output) = read_output_from_file(&temp_path) {
             let _ = std::fs::remove_file(&temp_path);
@@ -1046,7 +1054,8 @@ pub fn render_headless(
     ))
 }
 
-/// Serialize RenderOutput to bytes for IPC
+/// Serialize RenderOutput to bytes for IPC (used by subprocess mode)
+#[allow(dead_code)]
 fn serialize_output(output: &RenderOutput) -> Vec<u8> {
     let mut data = Vec::new();
 
@@ -1699,8 +1708,8 @@ fn check_headless_capture_ready(
         false
     };
 
-    // Fallback to placeholder depth after 10 frames (depth not working in headless mode)
-    if rgba_ready && !depth_ready && state.frame_count > 10 {
+    // Fallback to placeholder depth after 10 extra frames if depth readback fails
+    if rgba_ready && !depth_ready && state.frame_count > 70 {
         let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
         state.depth_data = Some(vec![camera_dist; pixel_count]);
