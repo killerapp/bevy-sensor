@@ -53,7 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Save depth image (normalized to grayscale)
         let depth_path = output_dir.join(format!("cracker_box_view{:02}_depth.png", i));
         let depth_min = output.depth.iter().cloned().fold(f64::INFINITY, f64::min);
-        let depth_max = output.depth.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let depth_max = output
+            .depth
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let depth_range = depth_max - depth_min;
 
         let depth_image: GrayImage = GrayImage::from_fn(output.width, output.height, |x, y| {

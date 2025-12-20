@@ -803,7 +803,10 @@ fn collect_image_captures(
             render_device.poll(bevy::render::render_resource::Maintain::Poll);
 
             if start.elapsed() > timeout {
-                eprintln!("Warning: Buffer mapping timeout after {:?}", start.elapsed());
+                eprintln!(
+                    "Warning: Buffer mapping timeout after {:?}",
+                    start.elapsed()
+                );
                 break;
             }
 

@@ -5,17 +5,17 @@
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::window::WindowPlugin;
-use bevy_sensor::backend::{BackendConfig, RenderBackend};
+use bevy_sensor::backend::BackendConfig;
 use std::time::Duration;
 
 fn detect_platform() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        return "Windows";
+        "Windows"
     }
     #[cfg(target_os = "macos")]
     {
-        return "macOS";
+        "macOS"
     }
     #[cfg(target_os = "linux")]
     {
@@ -26,11 +26,11 @@ fn detect_platform() -> &'static str {
                 return "WSL2";
             }
         }
-        return "Linux";
+        "Linux"
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        return "Unknown";
+        "Unknown"
     }
 }
 
@@ -94,7 +94,10 @@ fn main() {
     let config = BackendConfig::new();
     println!("Selected backend: {:?}", config.selected_backend());
     config.apply_env();
-    println!("Applied env: WGPU_BACKEND={:?}", std::env::var("WGPU_BACKEND"));
+    println!(
+        "Applied env: WGPU_BACKEND={:?}",
+        std::env::var("WGPU_BACKEND")
+    );
     println!();
 
     // Try to spawn a minimal Bevy app to see what happens
