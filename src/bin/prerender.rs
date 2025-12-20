@@ -73,6 +73,10 @@ pub struct RenderMetadata {
 const CI_TEST_OBJECTS: &[&str] = &["003_cracker_box", "005_tomato_soup_can"];
 
 fn main() {
+    // Initialize backend configuration FIRST
+    // This ensures proper backend selection (WebGPU for WSL2, etc.)
+    bevy_sensor::initialize();
+
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
@@ -107,8 +111,9 @@ fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .map_err(|_| "Error: --viewpoint must be a valid number")?;
     let output_dir =
         parse_arg(args, "--output").unwrap_or_else(|| "test_fixtures/renders".to_string());
+    let data_dir_str = parse_arg(args, "--data-dir").unwrap_or_else(|| "/tmp/ycb".to_string());
 
-    let ycb_dir = PathBuf::from("/tmp/ycb");
+    let ycb_dir = PathBuf::from(&data_dir_str);
     let object_dir = ycb_dir.join(&object_id);
 
     let render_config = RenderConfig::tbp_default();
@@ -160,6 +165,7 @@ fn run_batch_render(args: &[String]) {
 fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let output_dir =
         parse_arg(args, "--output-dir").unwrap_or_else(|| "test_fixtures/renders".to_string());
+    let data_dir_str = parse_arg(args, "--data-dir").unwrap_or_else(|| "/tmp/ycb".to_string());
     let objects_arg = parse_arg(args, "--objects");
 
     let objects: Vec<String> = if let Some(objs) = objects_arg {
@@ -170,16 +176,21 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     println!("=== bevy-sensor Pre-renderer ===");
     println!("Output directory: {}", output_dir);
+    println!("Data directory: {}", data_dir_str);
     println!("Objects: {:?}", objects);
 
     // Check if YCB models exist
-    let ycb_dir = PathBuf::from("/tmp/ycb");
+    let ycb_dir = PathBuf::from(&data_dir_str);
     if !ycb::models_exist(&ycb_dir) {
         println!("\nYCB models not found at {:?}", ycb_dir);
-        println!("Please download first:");
-        println!("  cargo run --example test_render");
-        println!("Or use ycbust directly.");
-        return Err("YCB models not found".into());
+        println!("Downloading representative models...");
+        
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        if let Err(e) = rt.block_on(ycb::download_models(&ycb_dir, ycb::Subset::Representative)) {
+            eprintln!("Failed to download models: {}", e);
+            std::process::exit(1);
+        }
+        println!("Download complete.");
     }
     println!("YCB models found at {:?}", ycb_dir);
 
@@ -301,7 +312,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     .arg(view_idx.to_string())
                     .arg("--output")
                     .arg(&output_dir)
-                    .env("WGPU_BACKEND", "vulkan")
+                    .arg("--data-dir")
+                    .arg(&data_dir_str)
                     .status();
 
                 match status {

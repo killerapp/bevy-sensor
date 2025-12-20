@@ -8,6 +8,9 @@ use bevy_obj::ObjPlugin;
 use std::f32::consts::PI;
 
 fn main() {
+    // Initialize backend configuration FIRST
+    bevy_sensor::initialize();
+
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(ObjPlugin)

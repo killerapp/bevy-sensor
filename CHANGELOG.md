@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Automated YCB model downloading in `prerender` binary when models are missing.
+- Added `--data-dir` argument to `prerender` for configurable YCB model directory.
+- Added `bevy_sensor::initialize()` calls to CLI binaries to ensure correct backend selection.
+
+### Changed
+- Moved `tokio` from `dev-dependencies` to `dependencies` to support async operations in binaries.
+- Removed hardcoded `WGPU_BACKEND=vulkan` from `prerender` subprocesses to allow platform-agnostic backend inheritance.
+- Simplified `README.md` and `GEMINI.md` for the alpha release.
+
 ## [0.4.3](https://github.com/killerapp/bevy-sensor/compare/v0.4.2...v0.4.3) - 2025-12-18
 
 ### Fixed

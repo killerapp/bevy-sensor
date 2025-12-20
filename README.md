@@ -1,119 +1,90 @@
 # bevy-sensor
 
-A Bevy library and CLI for capturing multi-view images of 3D OBJ models, designed for [Thousand Brains Project](https://github.com/thousandbrainsproject/tbp.monty) compatible sensor simulation.
+A Rust library and CLI for capturing multi-view images (RGBA + Depth) of 3D objects, specifically designed for the [Thousand Brains Project](https://github.com/thousandbrainsproject/tbp.monty) sensor simulation.
+
+This crate serves as the visual sensor module for the [neocortx](https://github.com/killerapp/neocortx) project, providing TBP-compatible sensor data (64x64 resolution, specific camera intrinsics) from YCB dataset models.
 
 ## Features
 
-- Multi-viewpoint capture using spherical coordinates
-- Object rotation support matching TBP benchmark formats
-- Library API for integration with neocortx
-- Programmatic YCB model downloads via [ycbust](https://crates.io/crates/ycbust) (v0.2.4)
-- Pre-configured TBP benchmark and training configurations
+- **TBP-Compatible:** Matches Habitat sensor specifications (resolution, coordinate systems).
+- **Multi-View:** Captures objects from spherical viewpoints (yaw/pitch).
+- **YCB Integration:** Auto-downloads and caches [YCB Benchmark](https://www.ycbbenchmarks.com/) models.
+- **Headless:** Optimized for headless rendering on Linux and WSL2 (via WebGPU).
 
 ## Requirements
 
-- Rust 1.70+
-- Bevy 0.15
-- GPU with Vulkan support (required for headless rendering on WSL2/Linux)
+- **Rust:** 1.70+
+- **Bevy:** 0.15+
+- **System:** Linux with Vulkan drivers (or WSL2).
+- **Tools:** `just` (recommended command runner).
 
-## Setup
+## Quick Start
 
-### Getting YCB Models
+1.  **Install Just** (Optional but recommended):
+    ```bash
+    cargo install just
+    ```
 
-**Programmatically (recommended):**
-
-```rust
-use bevy_sensor::ycb::{download_models, Subset};
-
-// Download representative subset (3 objects)
-download_models("/tmp/ycb", Subset::Representative).await?;
-
-// Or download 10 objects for TBP benchmark testing
-download_models("/tmp/ycb", Subset::Ten).await?;
-```
-
-The `assets/ycb` symlink points to `/tmp/ycb`.
+2.  **Run a Test Render:**
+    ```bash
+    just render-single 003_cracker_box
+    # Models will be automatically downloaded to /tmp/ycb if missing
+    # Output saved to test_fixtures/renders/
+    ```
 
 ## Usage
 
-### CLI
+### CLI (Batch Rendering)
 
+Render the standard TBP benchmark set (10 objects):
 ```bash
-cargo run --release
+just render-tbp-benchmark
 ```
 
-Default configuration captures 72 images (3 rotations × 24 viewpoints) matching TBP benchmark format.
-
-### Library
-
-```rust
-use bevy_sensor::{SensorConfig, ObjectRotation, ViewpointConfig};
-
-// TBP benchmark: 3 rotations × 24 viewpoints = 72 captures
-let config = SensorConfig::tbp_benchmark();
-
-// Full training: 14 rotations × 24 viewpoints = 336 captures
-let config = SensorConfig::tbp_full_training();
-
-// Custom configuration
-let config = SensorConfig {
-    viewpoints: ViewpointConfig {
-        radius: 0.5,
-        yaw_count: 8,
-        pitch_angles_deg: vec![-30.0, 0.0, 30.0],
-    },
-    object_rotations: ObjectRotation::tbp_benchmark_rotations(),
-    output_dir: "./captures".to_string(),
-    filename_pattern: "capture_{rot}_{view}.png".to_string(),
-};
+Render specific objects:
+```bash
+just render-batch "003_cracker_box,005_tomato_soup_can"
 ```
 
-### YCB Utilities
+### Library (Rust)
 
+Add to your `Cargo.toml`:
+```toml
+[dependencies]
+bevy-sensor = "0.4"
+```
+
+Use in your code:
 ```rust
-use bevy_sensor::ycb::{models_exist, object_mesh_path, object_texture_path, REPRESENTATIVE_OBJECTS};
+use bevy_sensor::{render_to_buffer, RenderConfig, ViewpointConfig, ObjectRotation};
+use std::path::Path;
 
-// Check if models are downloaded
-if !models_exist("/tmp/ycb") {
-    download_models("/tmp/ycb", Subset::Representative).await?;
-}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Configure
+    let config = RenderConfig::tbp_default(); // 64x64, TBP intrinsics
+    let viewpoint = bevy_sensor::generate_viewpoints(&ViewpointConfig::default())[0];
+    let rotation = ObjectRotation::identity();
+    let object_path = Path::new("/tmp/ycb/003_cracker_box");
 
-// Get paths to object files
-let mesh = object_mesh_path("/tmp/ycb", "003_cracker_box");
-let texture = object_texture_path("/tmp/ycb", "003_cracker_box");
-
-// List available objects
-for obj in REPRESENTATIVE_OBJECTS {
-    println!("{}", obj);
+    // 2. Render to memory (RGBA + Depth)
+    let output = render_to_buffer(object_path, &viewpoint, &rotation, &config)?;
+    
+    println!("Captured {}x{} image", output.width, output.height);
+    Ok(())
 }
 ```
 
-## TBP Alignment
+## Troubleshooting
 
-| TBP Benchmark | bevy-sensor |
-|---------------|-------------|
-| 3 known rotations `[0,0,0], [0,90,0], [0,180,0]` | `ObjectRotation::tbp_benchmark_rotations()` |
-| 14 known orientations (faces + corners) | `ObjectRotation::tbp_known_orientations()` |
-| Distant agent look up/down | Pitch angles: -30°, 0°, +30° |
-| Turn left/right | 8 yaw positions @ 45° intervals |
+### WSL2 Support
+WSL2 does not support native Vulkan window surfaces well. This project defaults to the **WebGPU** backend on WSL2, which works reliably for headless rendering.
+*   **Fix:** Ensure you have up-to-date GPU drivers on Windows.
 
-## Headless Rendering
-
-For headless GPU rendering on WSL2/Linux, use the Vulkan backend:
-
+### Software Rendering (No GPU)
+If you absolutely have no GPU, you can try software rendering (slow, potential artifacts):
 ```bash
-WGPU_BACKEND=vulkan cargo run --release
+LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe cargo run --release
 ```
-
-The library uses true headless rendering with `RenderTarget::Image` - no display or window surface required.
-
-## Output
-
-Files are saved as `capture_{rotation}_{viewpoint}.png`:
-- Rotation 0: identity `[0,0,0]`
-- Rotation 1: 90° yaw `[0,90,0]`
-- Rotation 2: 180° yaw `[0,180,0]`
-- Viewpoints 0-23: spherical positions around object
 
 ## License
 
