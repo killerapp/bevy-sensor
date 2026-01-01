@@ -617,7 +617,15 @@ fn collect_depth_captures(
                 }
             }
         }
+
+        // Explicit buffer drop with GPU sync to prevent memory leaks (#71)
+        // This ensures the staging buffer is released before processing more frames
+        drop(buffer);
     }
+
+    // Final GPU sync to ensure all buffer deallocations are processed
+    // This helps prevent SIGSEGV crashes during long benchmark runs (#71)
+    render_device.poll(bevy::render::render_resource::Maintain::Wait);
 }
 
 // ============================================================================
@@ -847,7 +855,15 @@ fn collect_image_captures(
                 }
             }
         }
+
+        // Explicit buffer drop with GPU sync to prevent memory leaks (#71)
+        // This ensures the staging buffer is released before processing more frames
+        drop(buffer);
     }
+
+    // Final GPU sync to ensure all buffer deallocations are processed
+    // This helps prevent SIGSEGV crashes during long benchmark runs (#71)
+    render_device.poll(bevy::render::render_resource::Maintain::Wait);
 }
 
 /// Plugin for headless image copy
