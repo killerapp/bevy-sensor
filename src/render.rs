@@ -961,9 +961,25 @@ pub fn render_headless(
         ));
     }
 
+    // Canonicalize paths to absolute paths for Bevy's AssetServer
+    // This prevents issues when relative paths (e.g., ../../ycb) are used
+    // and the binary runs from a different directory (e.g., target/release)
+    let mesh_path_abs = mesh_path.canonicalize().map_err(|e| {
+        RenderError::FileNotFound {
+            path: mesh_path.display().to_string(),
+            reason: format!("Failed to canonicalize path: {}", e),
+        }
+    })?;
+    let texture_path_abs = texture_path.canonicalize().map_err(|e| {
+        RenderError::FileNotFound {
+            path: texture_path.display().to_string(),
+            reason: format!("Failed to canonicalize path: {}", e),
+        }
+    })?;
+
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: mesh_path_abs.display().to_string(),
+        texture_path: texture_path_abs.display().to_string(),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
         config: config.clone(),
@@ -1815,9 +1831,25 @@ pub fn render_to_files(
         ));
     }
 
+    // Canonicalize paths to absolute paths for Bevy's AssetServer
+    // This prevents issues when relative paths (e.g., ../../ycb) are used
+    // and the binary runs from a different directory (e.g., target/release)
+    let mesh_path_abs = mesh_path.canonicalize().map_err(|e| {
+        RenderError::FileNotFound {
+            path: mesh_path.display().to_string(),
+            reason: format!("Failed to canonicalize path: {}", e),
+        }
+    })?;
+    let texture_path_abs = texture_path.canonicalize().map_err(|e| {
+        RenderError::FileNotFound {
+            path: texture_path.display().to_string(),
+            reason: format!("Failed to canonicalize path: {}", e),
+        }
+    })?;
+
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: mesh_path_abs.display().to_string(),
+        texture_path: texture_path_abs.display().to_string(),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
         config: config.clone(),
