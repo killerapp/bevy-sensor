@@ -71,11 +71,19 @@ pub mod cache;
 pub mod fixtures;
 
 // Re-export ycbust types for convenience
-pub use ycbust::{self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TEN_OBJECTS};
+#[allow(deprecated)]
+pub use ycbust::{
+    self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TBP_SIMILAR_OBJECTS,
+    TBP_STANDARD_OBJECTS, TEN_OBJECTS,
+};
 
 /// YCB dataset utilities
 pub mod ycb {
-    pub use ycbust::{download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TEN_OBJECTS};
+    #[allow(deprecated)]
+    pub use ycbust::{
+        download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TBP_SIMILAR_OBJECTS,
+        TBP_STANDARD_OBJECTS, TEN_OBJECTS,
+    };
 
     use std::path::Path;
 
@@ -115,12 +123,91 @@ pub mod ycb {
         Ok(())
     }
 
-    /// Check if YCB models exist at the given path
+    /// Download a specific list of YCB objects by name.
+    ///
+    /// Only fetches objects whose mesh file is not already present.
+    /// Uses the canonical YCB S3 URL scheme:
+    /// `https://ycb-benchmarks.s3.amazonaws.com/data/google/{id}_google_16k.tgz`
+    ///
+    /// # Example
+    /// ```ignore
+    /// use bevy_sensor::ycb::{download_objects, TBP_STANDARD_OBJECTS};
+    /// download_objects("/tmp/ycb", &TBP_STANDARD_OBJECTS).await?;
+    /// ```
+    pub async fn download_objects<P: AsRef<Path>>(
+        output_dir: P,
+        object_ids: &[&str],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let path = output_dir.as_ref();
+        std::fs::create_dir_all(path)?;
+
+        let missing: Vec<&&str> = object_ids
+            .iter()
+            .filter(|id| !object_mesh_path(path, id).exists())
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let client = reqwest::Client::new();
+
+        for object_id in &missing {
+            let url = format!(
+                "https://ycb-benchmarks.s3.amazonaws.com/data/google/{}_google_16k.tgz",
+                object_id
+            );
+            let tgz_path = path.join(format!("{}_google_16k.tgz", object_id));
+
+            let response = client.get(&url).send().await?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "HTTP {} downloading {}: {}",
+                    response.status(),
+                    object_id,
+                    url
+                )
+                .into());
+            }
+
+            let bytes = response.bytes().await?;
+            std::fs::write(&tgz_path, &bytes)?;
+
+            let tar_gz = std::fs::File::open(&tgz_path)?;
+            let tar = flate2::read::GzDecoder::new(tar_gz);
+            let mut archive = tar::Archive::new(tar);
+            archive.unpack(path)?;
+            std::fs::remove_file(&tgz_path).ok();
+        }
+        Ok(())
+    }
+
+    /// Check if YCB models exist at the given path.
+    ///
+    /// Checks for all objects in `REPRESENTATIVE_OBJECTS` rather than a single
+    /// hardcoded path so the check stays in sync with the actual default subset.
     pub fn models_exist<P: AsRef<Path>>(output_dir: P) -> bool {
         let path = output_dir.as_ref();
-        // Check for at least one representative object
-        path.join("003_cracker_box/google_16k/textured.obj")
-            .exists()
+        REPRESENTATIVE_OBJECTS
+            .iter()
+            .all(|id| object_mesh_path(path, id).exists())
+    }
+
+    /// Check if a specific set of YCB objects are present at the given path.
+    ///
+    /// Returns `true` only if every object in `object_ids` has a
+    /// `google_16k/textured.obj` mesh file present.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use bevy_sensor::ycb::{objects_exist, TBP_STANDARD_OBJECTS};
+    /// assert!(objects_exist("/tmp/ycb", &TBP_STANDARD_OBJECTS));
+    /// ```
+    pub fn objects_exist<P: AsRef<Path>>(output_dir: P, object_ids: &[&str]) -> bool {
+        let path = output_dir.as_ref();
+        object_ids
+            .iter()
+            .all(|id| object_mesh_path(path, id).exists())
     }
 
     /// Get the path to a specific YCB object's OBJ file
