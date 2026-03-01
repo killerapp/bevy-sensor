@@ -1037,7 +1037,8 @@ pub fn render_headless(
                     exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
-                .disable::<bevy::winit::WinitPlugin>(), // Disable winit entirely
+                .disable::<bevy::winit::WinitPlugin>() // Disable winit entirely
+                .disable::<bevy::log::LogPlugin>(), // Prevent duplicate global logger on re-entry
         )
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
@@ -1921,7 +1922,8 @@ pub fn render_to_files(
                     exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
-                .disable::<bevy::winit::WinitPlugin>(),
+                .disable::<bevy::winit::WinitPlugin>() // Disable winit entirely
+                .disable::<bevy::log::LogPlugin>(), // Prevent duplicate global logger on re-entry
         )
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
