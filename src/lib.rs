@@ -71,6 +71,7 @@ pub mod cache;
 pub mod fixtures;
 
 // Re-export ycbust types for convenience
+#[allow(deprecated)]
 pub use ycbust::{
     self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
     TEN_OBJECTS,
@@ -78,6 +79,7 @@ pub use ycbust::{
 
 /// YCB dataset utilities
 pub mod ycb {
+    #[allow(deprecated)]
     pub use ycbust::{
         download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
         TEN_OBJECTS,
@@ -1233,6 +1235,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_ycb_ten_objects() {
         // Verify ten objects subset is defined
         assert_eq!(crate::ycb::TEN_OBJECTS.len(), 10);
