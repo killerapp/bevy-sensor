@@ -71,12 +71,21 @@ pub mod cache;
 pub mod fixtures;
 
 // Re-export ycbust types for convenience
-pub use ycbust::{self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TEN_OBJECTS};
+#[allow(deprecated)]
+pub use ycbust::{
+    self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
+    TEN_OBJECTS,
+};
 
 /// YCB dataset utilities
 pub mod ycb {
-    pub use ycbust::{download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TEN_OBJECTS};
+    #[allow(deprecated)]
+    pub use ycbust::{
+        download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
+        TEN_OBJECTS,
+    };
 
+    use reqwest::Client;
     use std::path::Path;
 
     /// Download YCB models to the specified directory.
@@ -112,6 +121,37 @@ pub mod ycb {
         options: DownloadOptions,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         download_ycb(subset, output_dir.as_ref(), options).await?;
+        Ok(())
+    }
+
+    /// Download specific YCB objects by object ID using the standard `google_16k` meshes.
+    pub async fn download_objects<P: AsRef<Path>>(
+        output_dir: P,
+        object_ids: &[&str],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let output_dir = output_dir.as_ref();
+        let client = Client::new();
+        let options = DownloadOptions {
+            overwrite: false,
+            full: false,
+            show_progress: true,
+            delete_archives: true,
+        };
+
+        std::fs::create_dir_all(output_dir)?;
+
+        for object_id in object_ids {
+            let url = ycbust::get_tgz_url(object_id, "google_16k");
+            let archive_path = output_dir.join(format!("{object_id}_google_16k.tgz"));
+
+            if archive_path.exists() && !options.overwrite {
+                continue;
+            }
+
+            ycbust::download_file(&client, &url, &archive_path, options.show_progress).await?;
+            ycbust::extract_tgz(&archive_path, output_dir, options.delete_archives)?;
+        }
+
         Ok(())
     }
 
@@ -1195,6 +1235,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_ycb_ten_objects() {
         // Verify ten objects subset is defined
         assert_eq!(crate::ycb::TEN_OBJECTS.len(), 10);
@@ -1204,8 +1245,11 @@ mod tests {
     fn test_ycb_object_mesh_path() {
         let path = crate::ycb::object_mesh_path("/tmp/ycb", "003_cracker_box");
         assert_eq!(
-            path.to_string_lossy(),
-            "/tmp/ycb/003_cracker_box/google_16k/textured.obj"
+            path,
+            std::path::Path::new("/tmp/ycb")
+                .join("003_cracker_box")
+                .join("google_16k")
+                .join("textured.obj")
         );
     }
 
@@ -1213,8 +1257,11 @@ mod tests {
     fn test_ycb_object_texture_path() {
         let path = crate::ycb::object_texture_path("/tmp/ycb", "003_cracker_box");
         assert_eq!(
-            path.to_string_lossy(),
-            "/tmp/ycb/003_cracker_box/google_16k/texture_map.png"
+            path,
+            std::path::Path::new("/tmp/ycb")
+                .join("003_cracker_box")
+                .join("google_16k")
+                .join("texture_map.png")
         );
     }
 
