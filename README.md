@@ -4,6 +4,8 @@ A Rust library and CLI for capturing multi-view images (RGBA + Depth) of 3D obje
 
 This crate serves as the visual sensor module for the [neocortx](https://github.com/killerapp/neocortx) project, providing TBP-compatible sensor data (64x64 resolution, specific camera intrinsics) from YCB dataset models.
 
+This crate is intentionally narrow in scope: it exists to support TBP-compatible capture workflows, with NeoCortx as the primary downstream consumer. Public API changes should favor practical downstream utility over broad generalization.
+
 ## Features
 
 - **TBP-Compatible:** Matches Habitat sensor specifications (resolution, coordinate systems).
@@ -87,6 +89,13 @@ If you absolutely have no GPU, you can try software rendering (slow, potential a
 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe cargo run --release
 ```
 
+The library uses true headless rendering with `RenderTarget::Image` - no display or window surface required.
+
+## Development Posture
+
+- Prefer fixes in the owning repo: renderer and sensor issues belong here, YCB download/layout issues belong in `ycbust`.
+- Local path dependencies are fine during fast iteration, but stable downstream integrations should move back to released versions.
+- Throughput and Rust-native efficiency matter because this crate sits on NeoCortx's benchmark path.
 ## License
 
 MIT

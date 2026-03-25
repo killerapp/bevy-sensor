@@ -4,6 +4,13 @@
 
 A Bevy library and CLI that captures multi-view images of 3D OBJ models (YCB dataset) for sensor simulation. This project produces comparable results to the [Thousand Brains Project (TBP)](https://github.com/thousandbrainsproject/tbp.monty) habitat sensor for use in the neocortx Rust-based implementation.
 
+Current posture:
+- `bevy-sensor` is public, but its scope is intentionally narrow.
+- It primarily exists to move `../neocortx` forward on TBP/YCB parity work.
+- Prefer surgical, utilitarian fixes over broader framework ambitions.
+- If an issue belongs in `../ycbust`, fix it there or open the issue there instead of carrying a workaround here.
+- Runtime efficiency matters because render throughput directly affects downstream benchmark speed.
+
 ## Quick Reference
 
 ```bash
@@ -662,6 +669,11 @@ let intrinsics = output.intrinsics;                          // CameraIntrinsics
 ## Release Flow & Versioning
 
 **Version bumps are handled automatically by release-please.** Do NOT manually bump version numbers in `Cargo.toml`.
+
+Downstream policy:
+- Iterate against local sibling checkouts first when that is faster.
+- Once behavior is stable, release and move `neocortx` back to the published crate version.
+- If a bug in this repo blocks downstream progress and cannot be fixed immediately, open a GitHub issue here so the work can parallelize.
 
 ### Conventional Commits
 
