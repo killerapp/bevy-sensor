@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add public YCB API regression coverage for `TBP_STANDARD_OBJECTS` and `download_objects`
+
+### Changed
+
+- document the YCB helper surface that downstream crates such as NeoCortx bind to between releases
+
 ## [0.4.6](https://github.com/killerapp/bevy-sensor/compare/v0.4.5...v0.4.6) - 2025-12-20
 
 ### Added

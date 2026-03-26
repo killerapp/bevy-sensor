@@ -77,6 +77,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### YCB Helpers
+
+The public `ycb` module is the supported downstream surface for dataset selection and retrieval:
+
+```rust
+use bevy_sensor::ycb::{download_objects, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS};
+
+fn plan_downloads() {
+    assert_eq!(REPRESENTATIVE_OBJECTS.len(), 3);
+    assert_eq!(TBP_STANDARD_OBJECTS.len(), 10);
+
+    let future = download_objects("/tmp/ycb", &["003_cracker_box"]);
+    drop(future);
+}
+```
+
+NeoCortx binds to this YCB helper surface directly. If it changes, release the crate promptly so downstream builds move forward on published versions instead of long-lived local patches.
+
 ## Troubleshooting
 
 ### WSL2 Support
