@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7](https://github.com/killerapp/bevy-sensor/compare/v0.4.6...v0.4.7) - 2026-03-26
+
+### Fixed
+
+- *(ycb)* guard downstream release api
+- keep deprecated ycb compatibility without clippy regressions
+- *(ycb)* align integration with ycbust 0.3
+
+### Other
+
+- codify neocortx downstream posture
+
 ### Added
 
 - add public YCB API regression coverage for `TBP_STANDARD_OBJECTS` and `download_objects`
