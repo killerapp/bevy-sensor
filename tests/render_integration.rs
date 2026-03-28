@@ -17,11 +17,13 @@
 //! - Depth buffer readback works
 
 use bevy_sensor::{
-    backend::detect_platform, cache::ModelCache, render_to_buffer, render_to_buffer_cached,
-    ObjectRotation, RenderConfig, RenderOutput, ViewpointConfig,
+    backend::detect_platform, batch::BatchRenderRequest, cache::ModelCache, render_batch,
+    render_to_buffer, render_to_buffer_cached, BatchRenderConfig, ObjectRotation, RenderConfig,
+    RenderOutput, ViewpointConfig,
 };
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Save render output to test_fixtures/test_renders for inspection
 fn save_render_output(output: &RenderOutput, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -154,6 +156,88 @@ fn test_render_integration() {
     }
 
     println!("✓ Integration test passed");
+}
+
+#[test]
+#[ignore] // Skip in CI - run manually on hardware/render-capable environments
+fn test_batch_render_matches_sequential_episode_outputs() {
+    println!("\n=== Batch vs Sequential Render Test ===");
+
+    let object_dir = PathBuf::from("/tmp/ycb/003_cracker_box");
+    if !object_dir.exists() {
+        println!("⚠ Skipping - YCB models not found");
+        return;
+    }
+
+    let viewpoint_config = ViewpointConfig::default();
+    let viewpoints = bevy_sensor::generate_viewpoints(&viewpoint_config);
+    let selected_viewpoints: Vec<_> = viewpoints.into_iter().take(3).collect();
+    let rotation = ObjectRotation::identity();
+    let config = RenderConfig::tbp_default();
+
+    let sequential_start = Instant::now();
+    let sequential_outputs: Vec<_> = selected_viewpoints
+        .iter()
+        .map(|viewpoint| {
+            render_to_buffer(&object_dir, viewpoint, &rotation, &config)
+                .expect("Sequential render failed")
+        })
+        .collect();
+    let sequential_elapsed = sequential_start.elapsed();
+
+    let batch_requests: Vec<_> = selected_viewpoints
+        .iter()
+        .map(|viewpoint| BatchRenderRequest {
+            object_dir: object_dir.clone(),
+            viewpoint: *viewpoint,
+            object_rotation: rotation.clone(),
+            render_config: config.clone(),
+        })
+        .collect();
+
+    let batch_start = Instant::now();
+    let batch_outputs =
+        render_batch(batch_requests, &BatchRenderConfig::default()).expect("Batch render failed");
+    let batch_elapsed = batch_start.elapsed();
+
+    assert_eq!(batch_outputs.len(), sequential_outputs.len());
+
+    for (idx, (batch_output, sequential_output)) in batch_outputs
+        .iter()
+        .zip(sequential_outputs.iter())
+        .enumerate()
+    {
+        assert_eq!(batch_output.request.viewpoint, selected_viewpoints[idx]);
+        assert_eq!(batch_output.request.object_rotation, rotation);
+        assert_eq!(batch_output.width, sequential_output.width);
+        assert_eq!(batch_output.height, sequential_output.height);
+        assert_eq!(batch_output.intrinsics, sequential_output.intrinsics);
+        assert_eq!(batch_output.rgba, sequential_output.rgba);
+        assert_eq!(batch_output.depth.len(), sequential_output.depth.len());
+
+        let max_depth_delta = batch_output
+            .depth
+            .iter()
+            .zip(sequential_output.depth.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_depth_delta <= 1e-9,
+            "Depth mismatch at viewpoint {idx}: max delta {max_depth_delta}"
+        );
+    }
+
+    println!(
+        "  Sequential: {:.2}s for {} viewpoints",
+        sequential_elapsed.as_secs_f64(),
+        sequential_outputs.len()
+    );
+    println!(
+        "  Batch: {:.2}s for {} viewpoints",
+        batch_elapsed.as_secs_f64(),
+        batch_outputs.len()
+    );
+    println!("✓ Batch and sequential outputs matched");
 }
 
 #[test]
