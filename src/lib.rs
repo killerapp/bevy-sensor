@@ -444,7 +444,7 @@ pub struct CaptureCamera;
 /// Configuration for headless rendering.
 ///
 /// Matches TBP habitat sensor defaults: 64x64 resolution with RGBD output.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderConfig {
     /// Image width in pixels (default: 64)
     pub width: u32,
@@ -464,7 +464,7 @@ pub struct RenderConfig {
 /// Lighting configuration for rendering.
 ///
 /// Controls ambient light and point lights in the scene.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LightingConfig {
     /// Ambient light brightness (0.0 - 1.0, default: 0.3)
     pub ambient_brightness: f32,
@@ -835,8 +835,9 @@ pub fn render_all_viewpoints(
 /// Render with model caching support for efficient multi-viewpoint rendering.
 ///
 /// This function tracks which models have been loaded and provides performance
-/// insights. For maximum efficiency when rendering many viewpoints of the same
-/// object, use the batch rendering API (`create_batch_renderer`, `render_batch`).
+/// insights. The current batch API is a queue-oriented wrapper, not a persistent
+/// renderer, so this function and `render_to_buffer()` use the same underlying
+/// headless app-per-render path today.
 ///
 /// # Arguments
 /// * `object_dir` - Path to YCB object directory
@@ -867,7 +868,7 @@ pub fn render_all_viewpoints(
 ///     &mut cache,
 /// )?;
 ///
-/// // Subsequent renders: tracks in cache (actual speedup comes from batch API)
+/// // Subsequent renders: tracks in cache
 /// for viewpoint in &viewpoints[1..] {
 ///     let output = render_to_buffer_cached(
 ///         &object_dir,
@@ -880,8 +881,9 @@ pub fn render_all_viewpoints(
 /// ```
 ///
 /// # Note
-/// This function uses the same rendering engine as `render_to_buffer()`. For true
-/// asset caching performance gains (2-3x speedup), combine with batch rendering:
+/// This function uses the same rendering engine as `render_to_buffer()`. The current
+/// batch API preserves ordering and output structure but does not yet reuse a live
+/// Bevy renderer across calls.
 ///
 /// ```ignore
 /// use bevy_sensor::{render_batch, batch::BatchRenderRequest, BatchRenderConfig, RenderConfig, ObjectRotation};
@@ -955,10 +957,10 @@ pub use batch::{
     BatchState, RenderStatus,
 };
 
-/// Create a new batch renderer for efficient multi-viewpoint rendering.
+/// Create a new batch renderer helper for multi-viewpoint workflows.
 ///
-/// This creates a persistent Bevy app that can render multiple viewpoints without
-/// subprocess spawning overhead. Achieves 10-100x speedup vs individual render_to_buffer calls.
+/// The current implementation stores queued requests and executes them sequentially via
+/// `render_to_buffer()`. It does not yet keep a persistent Bevy app alive across renders.
 ///
 /// # Arguments
 /// * `config` - Batch rendering configuration
@@ -973,8 +975,6 @@ pub use batch::{
 /// let mut renderer = create_batch_renderer(&BatchRenderConfig::default())?;
 /// ```
 pub fn create_batch_renderer(config: &BatchRenderConfig) -> Result<BatchRenderer, RenderError> {
-    // For now, just create an empty renderer that will need a Bevy app
-    // The actual app creation happens when rendering starts
     Ok(BatchRenderer::new(config.clone()))
 }
 
@@ -1013,8 +1013,8 @@ pub fn queue_render_request(
 
 /// Process and execute the next render in the batch queue.
 ///
-/// Executes a single render from the queued requests. Returns None when the queue is empty.
-/// Use this in a loop to process all queued renders.
+/// Executes a single queued request via `render_to_buffer()`. Returns None when the queue
+/// is empty. Use this in a loop to process all queued renders in a stable order.
 ///
 /// # Arguments
 /// * `renderer` - The batch renderer instance
@@ -1036,8 +1036,6 @@ pub fn render_next_in_batch(
     renderer: &mut BatchRenderer,
     _timeout_ms: u32,
 ) -> Result<Option<BatchRenderOutput>, RenderError> {
-    // This is a stub - the actual implementation will require a running Bevy app
-    // For now, just render single batches immediately using render_to_buffer
     if let Some(request) = renderer.pending_requests.pop_front() {
         let output = render_to_buffer(
             &request.object_dir,
@@ -1076,6 +1074,27 @@ pub fn render_batch(
     requests: Vec<BatchRenderRequest>,
     config: &BatchRenderConfig,
 ) -> Result<Vec<BatchRenderOutput>, RenderError> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if requests.len() > 1 && requests_share_batch_context(&requests) {
+        let first_request = requests[0].clone();
+        let viewpoints: Vec<Transform> = requests.iter().map(|request| request.viewpoint).collect();
+        let outputs = render::render_headless_sequence(
+            &first_request.object_dir,
+            &viewpoints,
+            &first_request.object_rotation,
+            &first_request.render_config,
+        )?;
+
+        return Ok(requests
+            .into_iter()
+            .zip(outputs)
+            .map(|(request, output)| BatchRenderOutput::from_render_output(request, output))
+            .collect());
+    }
+
     let mut renderer = create_batch_renderer(config)?;
 
     // Queue all requests
@@ -1090,6 +1109,18 @@ pub fn render_batch(
     }
 
     Ok(results)
+}
+
+fn requests_share_batch_context(requests: &[BatchRenderRequest]) -> bool {
+    let Some(first) = requests.first() else {
+        return true;
+    };
+
+    requests.iter().all(|request| {
+        request.object_dir == first.object_dir
+            && request.object_rotation == first.object_rotation
+            && request.render_config == first.render_config
+    })
 }
 
 // Re-export bevy types that consumers will need
@@ -1113,6 +1144,44 @@ mod tests {
         assert_eq!(rot.pitch, 10.0);
         assert_eq!(rot.yaw, 20.0);
         assert_eq!(rot.roll, 30.0);
+    }
+
+    #[test]
+    fn test_requests_share_batch_context_for_homogeneous_batch() {
+        let config = RenderConfig::tbp_default();
+        let request = BatchRenderRequest {
+            object_dir: "/tmp/ycb/003_cracker_box".into(),
+            viewpoint: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+            render_config: config.clone(),
+        };
+
+        assert!(requests_share_batch_context(&[
+            request.clone(),
+            BatchRenderRequest {
+                viewpoint: Transform::from_xyz(1.0, 0.0, 0.0),
+                ..request
+            },
+        ]));
+    }
+
+    #[test]
+    fn test_requests_share_batch_context_rejects_mixed_objects() {
+        let config = RenderConfig::tbp_default();
+        let request = BatchRenderRequest {
+            object_dir: "/tmp/ycb/003_cracker_box".into(),
+            viewpoint: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+            render_config: config.clone(),
+        };
+
+        assert!(!requests_share_batch_context(&[
+            request.clone(),
+            BatchRenderRequest {
+                object_dir: "/tmp/ycb/005_tomato_soup_can".into(),
+                ..request
+            },
+        ]));
     }
 
     #[test]

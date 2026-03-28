@@ -178,7 +178,9 @@ ObjectRotation::tbp_known_orientations()
 
 ### Batch Rendering API (NEW)
 
-For rendering 10+ viewpoints efficiently, use the batch API to eliminate subprocess and app initialization overhead. Achieves 10-50x speedup compared to sequential `render_to_buffer()` calls.
+The batch API currently provides ordered queue management and structured outputs over
+sequential `render_to_buffer()` calls. It does not yet keep a persistent Bevy app alive,
+so treat it as a convenience surface rather than a throughput optimization today.
 
 **Quick Example:**
 
