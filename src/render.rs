@@ -1940,13 +1940,13 @@ fn tick_headless_batch_warmup(batch: Option<ResMut<HeadlessBatchSequence>>) {
 fn extract_and_continue_headless_batch(
     mut state: ResMut<RenderState>,
     request: Res<RenderRequest>,
-    shared_rgba: Res<SharedRgbaBuffer>,
-    shared_depth: Res<SharedDepthBuffer>,
+    buffers: (Res<SharedRgbaBuffer>, Res<SharedDepthBuffer>),
     batch: Option<ResMut<HeadlessBatchSequence>>,
     mut camera_query: Query<&mut Transform, With<RenderCamera>>,
     mut depth_request: ResMut<DepthCaptureRequest>,
     mut image_copiers: Query<&mut ImageCopier>,
 ) {
+    let (shared_rgba, shared_depth) = buffers;
     let Some(mut batch) = batch else {
         return;
     };
