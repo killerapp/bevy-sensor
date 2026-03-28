@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8](https://github.com/killerapp/bevy-sensor/compare/v0.4.7...v0.4.8) - 2026-03-28
+
+### Added
+
+- *(render)* batch homogeneous viewpoint renders
+
+### Fixed
+
+- *(ci)* satisfy clippy on batch continuation system
+- *(render)* stabilize batch headless validation
+
+### Other
+
+- *(release)* bump version to 0.4.8
+
 ## [0.4.7](https://github.com/killerapp/bevy-sensor/compare/v0.4.6...v0.4.7) - 2026-03-26
 
 ### Fixed
