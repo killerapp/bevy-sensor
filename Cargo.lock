@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "bevy-sensor"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bevy",
  "bevy_obj",
