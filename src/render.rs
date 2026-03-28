@@ -94,6 +94,7 @@ struct RenderState {
     frame_count: u32,
     scene_loaded: bool,
     texture_loaded: bool,
+    materials_applied: bool,
     capture_ready: bool,
     screenshot_requested: bool,
     captured: bool,
@@ -1166,6 +1167,12 @@ pub fn render_headless_sequence(
             .chain(),
     );
 
+    // Manual app.update() loops do not run plugin finish/cleanup hooks automatically.
+    // Bevy's screenshot plugin inserts CapturedScreenshots during finish(), so run the
+    // normal startup phases before driving the headless batch loop ourselves.
+    app.finish();
+    app.cleanup();
+
     let timeout = std::time::Duration::from_secs(60);
     let start = std::time::Instant::now();
 
@@ -1462,29 +1469,25 @@ fn apply_materials(
 
     let Some(tex) = texture else { return };
 
-    // Create textured material
-    let textured_material = materials.add(StandardMaterial {
-        base_color_texture: Some(tex.0.clone()),
-        unlit: true,
-        ..default()
-    });
+    if !state.materials_applied {
+        // Create and assign the textured material once, then let the scene warm up.
+        let textured_material = materials.add(StandardMaterial {
+            base_color_texture: Some(tex.0.clone()),
+            unlit: true,
+            ..default()
+        });
 
-    // Apply to all meshes
-    let mut count = 0;
-    for mut mat in mesh_query.iter_mut() {
-        mat.0 = textured_material.clone();
-        count += 1;
-    }
+        for mut mat in mesh_query.iter_mut() {
+            mat.0 = textured_material.clone();
+        }
 
-    if count > 0 {
-        println!("Applied texture to {} meshes", count);
+        state.materials_applied = true;
     }
 
     // Wait more frames after applying materials
     // Software rendering (llvmpipe) needs more frames to fully render
     if state.frame_count >= 60 {
         state.capture_ready = true;
-        println!("Ready to capture (frame {})", state.frame_count);
     }
 }
 
@@ -1793,8 +1796,6 @@ fn request_headless_capture(
     {
         return;
     }
-
-    println!("Requesting capture at frame {}", state.frame_count);
 
     // Enable the ImageCopier to trigger RGBA extraction
     for mut copier in query.iter_mut() {
