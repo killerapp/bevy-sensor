@@ -37,11 +37,12 @@
 //! a temp file. The main thread reads this file after the process would
 //! normally exit.
 
-use bevy::app::ScheduleRunnerPlugin;
+use bevy::app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin};
 use bevy::asset::LoadState;
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::query::QueryItem;
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::render::camera::{ExtractedCamera, RenderTarget};
 use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
@@ -918,6 +919,33 @@ struct SharedOutput(Arc<Mutex<Option<RenderOutput>>>);
 #[allow(dead_code)]
 struct RenderTargetImage(Handle<Image>);
 
+/// Tracks progress for a homogeneous batch of viewpoints rendered in one app.
+#[derive(Resource)]
+struct HeadlessBatchSequence {
+    viewpoints: Vec<Transform>,
+    current_index: usize,
+    outputs: Vec<RenderOutput>,
+    warmup_frames_remaining: u32,
+    done: bool,
+}
+
+impl HeadlessBatchSequence {
+    fn new(viewpoints: Vec<Transform>) -> Self {
+        let capacity = viewpoints.len();
+        Self {
+            viewpoints,
+            current_index: 0,
+            outputs: Vec::with_capacity(capacity),
+            warmup_frames_remaining: 0,
+            done: capacity == 0,
+        }
+    }
+
+    fn current_viewpoint(&self) -> Option<Transform> {
+        self.viewpoints.get(self.current_index).cloned()
+    }
+}
+
 /// Perform headless rendering of a YCB object.
 ///
 /// This uses true headless GPU rendering via `RenderTarget::Image`, which does NOT
@@ -1005,7 +1033,9 @@ pub fn render_headless(
                     exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
-                .disable::<bevy::winit::WinitPlugin>(), // Disable winit entirely
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<LogPlugin>()
+                .disable::<TerminalCtrlCHandlerPlugin>(), // Avoid re-registering global process handlers
         )
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
@@ -1055,6 +1085,112 @@ pub fn render_headless(
     Err(RenderError::RenderFailed(
         "Render did not complete".to_string(),
     ))
+}
+
+/// Render a homogeneous sequence of viewpoints in a single headless Bevy app.
+///
+/// All captures share the same object, object rotation, and render configuration.
+/// This is the fast path used by the batch API for episode-style workloads.
+pub fn render_headless_sequence(
+    object_dir: &Path,
+    viewpoints: &[Transform],
+    object_rotation: &ObjectRotation,
+    config: &RenderConfig,
+) -> Result<Vec<RenderOutput>, RenderError> {
+    if viewpoints.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mesh_path = object_dir.join("google_16k/textured.obj");
+    let texture_path = object_dir.join("google_16k/texture_map.png");
+
+    if !mesh_path.exists() {
+        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+    }
+    if !texture_path.exists() {
+        return Err(RenderError::TextureNotFound(
+            texture_path.display().to_string(),
+        ));
+    }
+
+    let request = RenderRequest {
+        mesh_path: mesh_path.display().to_string(),
+        texture_path: texture_path.display().to_string(),
+        camera_transform: viewpoints[0],
+        object_rotation: object_rotation.clone(),
+        config: config.clone(),
+    };
+
+    let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
+    let rgba_clone = shared_rgba.clone();
+
+    let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
+    let depth_clone = shared_depth.clone();
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<LogPlugin>()
+            .disable::<TerminalCtrlCHandlerPlugin>(),
+    )
+    .add_plugins(ObjPlugin)
+    .add_plugins(ImageCopyPlugin {
+        shared_rgba: rgba_clone,
+    })
+    .add_plugins(DepthReadbackPlugin {
+        shared_depth: depth_clone,
+        near: config.near_plane,
+        far: config.far_plane,
+    })
+    .insert_resource(request)
+    .insert_resource(shared_rgba)
+    .insert_resource(HeadlessBatchSequence::new(viewpoints.to_vec()))
+    .init_resource::<RenderState>()
+    .add_systems(Startup, setup_headless_scene)
+    .add_systems(
+        Update,
+        (
+            check_assets_loaded,
+            apply_materials,
+            tick_headless_batch_warmup,
+            request_headless_capture,
+            check_headless_capture_ready,
+            extract_and_continue_headless_batch,
+        )
+            .chain(),
+    );
+
+    let timeout = std::time::Duration::from_secs(60);
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(RenderError::RenderTimeout { duration_secs: 60 });
+        }
+
+        app.update();
+
+        if app.world().resource::<HeadlessBatchSequence>().done {
+            break;
+        }
+    }
+
+    let mut batch = app.world_mut().resource_mut::<HeadlessBatchSequence>();
+    if batch.outputs.len() != viewpoints.len() {
+        return Err(RenderError::RenderFailed(format!(
+            "Batch render produced {} outputs for {} viewpoints",
+            batch.outputs.len(),
+            viewpoints.len()
+        )));
+    }
+
+    Ok(std::mem::take(&mut batch.outputs))
 }
 
 /// Serialize RenderOutput to bytes for IPC (used by subprocess mode)
@@ -1645,8 +1781,16 @@ fn request_headless_capture(
     mut state: ResMut<RenderState>,
     mut depth_request: ResMut<DepthCaptureRequest>,
     mut query: Query<&mut ImageCopier>,
+    batch: Option<Res<HeadlessBatchSequence>>,
 ) {
     if !state.capture_ready || state.screenshot_requested {
+        return;
+    }
+
+    if batch
+        .as_ref()
+        .is_some_and(|batch| batch.warmup_frames_remaining > 0)
+    {
         return;
     }
 
@@ -1729,7 +1873,12 @@ fn extract_and_exit_headless(
     request: Res<RenderRequest>,
     shared_output: Res<SharedOutput>,
     mut app_exit: EventWriter<bevy::app::AppExit>,
+    batch: Option<Res<HeadlessBatchSequence>>,
 ) {
+    if batch.is_some() {
+        return;
+    }
+
     if state.exit_requested {
         return;
     }
@@ -1772,6 +1921,102 @@ fn extract_and_exit_headless(
         // Send AppExit event (headless apps use this instead of closing windows)
         app_exit.send(bevy::app::AppExit::Success);
         state.exit_requested = true;
+    }
+}
+
+/// Advance the short post-camera-move warmup for homogeneous batch rendering.
+fn tick_headless_batch_warmup(batch: Option<ResMut<HeadlessBatchSequence>>) {
+    let Some(mut batch) = batch else {
+        return;
+    };
+
+    if batch.warmup_frames_remaining > 0 {
+        batch.warmup_frames_remaining -= 1;
+    }
+}
+
+/// Extract one batch output and continue rendering the next viewpoint in the same app.
+fn extract_and_continue_headless_batch(
+    mut state: ResMut<RenderState>,
+    request: Res<RenderRequest>,
+    shared_rgba: Res<SharedRgbaBuffer>,
+    shared_depth: Res<SharedDepthBuffer>,
+    batch: Option<ResMut<HeadlessBatchSequence>>,
+    mut camera_query: Query<&mut Transform, With<RenderCamera>>,
+    mut depth_request: ResMut<DepthCaptureRequest>,
+    mut image_copiers: Query<&mut ImageCopier>,
+) {
+    let Some(mut batch) = batch else {
+        return;
+    };
+
+    if state.exit_requested || !state.captured || batch.done {
+        return;
+    }
+
+    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+        let width = state.image_width;
+        let height = state.image_height;
+
+        let config = &request.config;
+        let intrinsics = crate::CameraIntrinsics {
+            focal_length: [
+                width as f64 * config.zoom as f64,
+                height as f64 * config.zoom as f64,
+            ],
+            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
+            image_size: [width, height],
+        };
+
+        let output = RenderOutput {
+            rgba: rgba.clone(),
+            depth: depth.clone(),
+            width,
+            height,
+            intrinsics,
+            camera_transform: batch
+                .current_viewpoint()
+                .unwrap_or(request.camera_transform),
+            object_rotation: request.object_rotation.clone(),
+        };
+        batch.outputs.push(output);
+
+        let next_index = batch.current_index + 1;
+        if next_index >= batch.viewpoints.len() {
+            batch.done = true;
+            state.exit_requested = true;
+            return;
+        }
+
+        batch.current_index = next_index;
+        batch.warmup_frames_remaining = 3;
+
+        if let Some(next_viewpoint) = batch.current_viewpoint() {
+            for mut camera_transform in camera_query.iter_mut() {
+                *camera_transform = next_viewpoint;
+            }
+        }
+
+        if let Ok(mut guard) = shared_rgba.0.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = shared_depth.0.lock() {
+            *guard = None;
+        }
+
+        for mut copier in image_copiers.iter_mut() {
+            copier.enabled = false;
+        }
+
+        depth_request.requested = false;
+        state.frame_count = 0;
+        state.capture_ready = true;
+        state.screenshot_requested = false;
+        state.captured = false;
+        state.rgba_data = None;
+        state.depth_data = None;
+        state.image_width = 0;
+        state.image_height = 0;
     }
 }
 
@@ -1873,7 +2118,9 @@ pub fn render_to_files(
                     exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
-                .disable::<bevy::winit::WinitPlugin>(),
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<LogPlugin>()
+                .disable::<TerminalCtrlCHandlerPlugin>(),
         )
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,

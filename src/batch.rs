@@ -1,8 +1,10 @@
 //! Batch rendering API for multiple viewpoints and objects.
 //!
-//! This module provides efficient batch rendering that eliminates subprocess spawning and
-//! Bevy app initialization overhead. A single Bevy app instance is kept alive and reused
-//! to render multiple viewpoints, achieving 10-100x speedup for typical batches.
+//! Today this module is a queue-oriented wrapper around sequential `render_to_buffer()`
+//! calls. It does not yet keep a persistent Bevy app alive across renders; that follow-up
+//! remains tracked work. The API is still useful for consumers that want ordered request
+//! management and structured batch outputs without promising reuse semantics that do not
+//! exist yet.
 //!
 //! # Example
 //!
@@ -13,7 +15,7 @@
 //! };
 //! use std::path::PathBuf;
 //!
-//! // Create a persistent renderer (initializes once)
+//! // Create a batch helper
 //! let config = BatchRenderConfig::default();
 //! let mut renderer = create_batch_renderer(&config)?;
 //!
@@ -220,7 +222,7 @@ pub enum BatchState {
     Shutdown,
 }
 
-/// Manages a persistent Bevy app for batch rendering.
+/// Manages queued render requests and completed outputs for batch-style workflows.
 pub struct BatchRenderer {
     /// Queued render requests
     pub pending_requests: VecDeque<BatchRenderRequest>,
