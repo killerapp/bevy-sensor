@@ -65,10 +65,31 @@ use bevy_obj::ObjPlugin;
 use std::fs::File;
 use std::io::Read as IoRead;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput};
+
+#[cfg(test)]
+static HEADLESS_APP_INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+fn note_headless_app_init() {
+    #[cfg(test)]
+    HEADLESS_APP_INIT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_headless_app_init_count_for_tests() {
+    HEADLESS_APP_INIT_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn headless_app_init_count_for_tests() -> usize {
+    HEADLESS_APP_INIT_COUNT.load(Ordering::Relaxed)
+}
 
 /// Check if a display is available for windowed rendering.
 ///
@@ -1026,6 +1047,7 @@ pub fn render_headless(
 
     // Run Bevy app with HEADLESS configuration (no window surfaces!)
     // Uses ScheduleRunnerPlugin instead of WinitPlugin
+    note_headless_app_init();
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -1129,6 +1151,7 @@ pub fn render_headless_sequence(
     let depth_clone = shared_depth.clone();
 
     let mut app = App::new();
+    note_headless_app_init();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
@@ -2111,6 +2134,7 @@ pub fn render_to_files(
     backend_config.apply_env();
 
     // Run Bevy app with HEADLESS configuration
+    note_headless_app_init();
     App::new()
         .add_plugins(
             DefaultPlugins

@@ -95,6 +95,27 @@ fn plan_downloads() {
 
 NeoCortx binds to this YCB helper surface directly. If it changes, release the crate promptly so downstream builds move forward on published versions instead of long-lived local patches.
 
+### Headless Throughput Smoke Check
+
+For the homogeneous batch path used by NeoCortx's episode pre-rendering, run:
+
+```bash
+just test-headless-throughput-smoke
+```
+
+This ignored smoke test checks the churn target directly:
+
+- sequential `render_to_buffer()` builds one headless Bevy app per viewpoint
+- homogeneous `render_batch()` builds one headless Bevy app for the whole viewpoint sequence
+
+On a known-good remote GPU host, you can also enforce a wall-clock budget:
+
+```bash
+BEVY_SENSOR_HEADLESS_BATCH_BUDGET_SECS=5 just test-headless-throughput-smoke
+```
+
+The smoke test skips cleanly if `/tmp/ycb/003_cracker_box` is not present.
+
 ## Troubleshooting
 
 ### WSL2 Support

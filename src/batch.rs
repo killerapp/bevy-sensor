@@ -1,10 +1,10 @@
 //! Batch rendering API for multiple viewpoints and objects.
 //!
-//! Today this module is a queue-oriented wrapper around sequential `render_to_buffer()`
-//! calls. It does not yet keep a persistent Bevy app alive across renders; that follow-up
-//! remains tracked work. The API is still useful for consumers that want ordered request
-//! management and structured batch outputs without promising reuse semantics that do not
-//! exist yet.
+//! Today this module's `BatchRenderer` helper is a queue-oriented wrapper around
+//! sequential `render_to_buffer()` calls. The higher-level `crate::render_batch()`
+//! convenience function does reuse a single headless Bevy app for homogeneous
+//! viewpoint sequences. The queue API remains useful for consumers that want
+//! ordered request management without requiring that fast path.
 //!
 //! # Example
 //!
