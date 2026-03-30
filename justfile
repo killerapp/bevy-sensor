@@ -56,6 +56,10 @@ test-lib:
 test-render-integration:
     cargo test -- --ignored --test render_integration -- --nocapture
 
+# Run the homogeneous batch throughput smoke check used for headless regression tracking
+test-headless-throughput-smoke:
+    WGPU_BACKEND=vulkan cargo test --lib test_headless_throughput_smoke_uses_single_app_for_homogeneous_batch -- --ignored --nocapture
+
 # Run integration tests with WebGPU backend explicitly
 test-render-webgpu:
     WGPU_BACKEND=webgpu cargo test -- --ignored --test render_integration -- --nocapture

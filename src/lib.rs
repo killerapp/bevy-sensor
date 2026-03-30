@@ -804,6 +804,7 @@ pub fn render_to_buffer(
 /// Render all viewpoints and rotations for a YCB object.
 ///
 /// Convenience function that renders all combinations of viewpoints and rotations.
+/// Each rotation reuses a single headless Bevy app across the full viewpoint sequence.
 ///
 /// # Arguments
 /// * `object_dir` - Path to YCB object directory
@@ -823,10 +824,12 @@ pub fn render_all_viewpoints(
     let mut outputs = Vec::with_capacity(viewpoints.len() * rotations.len());
 
     for rotation in rotations {
-        for viewpoint in &viewpoints {
-            let output = render_to_buffer(object_dir, viewpoint, rotation, render_config)?;
-            outputs.push(output);
-        }
+        outputs.extend(render::render_headless_sequence(
+            object_dir,
+            &viewpoints,
+            rotation,
+            render_config,
+        )?);
     }
 
     Ok(outputs)
@@ -882,8 +885,9 @@ pub fn render_all_viewpoints(
 ///
 /// # Note
 /// This function uses the same rendering engine as `render_to_buffer()`. The current
-/// batch API preserves ordering and output structure but does not yet reuse a live
-/// Bevy renderer across calls.
+/// caching helper itself still uses the app-per-render path. For homogeneous
+/// multi-viewpoint workloads, prefer `render_batch()` or `render_all_viewpoints()`
+/// so the renderer can stay alive across the sequence.
 ///
 /// ```ignore
 /// use bevy_sensor::{render_batch, batch::BatchRenderRequest, BatchRenderConfig, RenderConfig, ObjectRotation};
@@ -1055,7 +1059,9 @@ pub fn render_next_in_batch(
 /// Render multiple requests in batch (convenience function).
 ///
 /// Queues all requests and executes them in batch, returning all results.
-/// Simpler than manage queue + loop for one-off batches.
+/// Simpler than manage queue + loop for one-off batches. When all requests share
+/// the same object, rotation, and render config, this uses a single headless app
+/// for the whole viewpoint sequence.
 ///
 /// # Arguments
 /// * `requests` - Vector of render requests
@@ -1182,6 +1188,114 @@ mod tests {
                 ..request
             },
         ]));
+    }
+
+    #[test]
+    #[ignore = "Requires a GPU-capable headless render environment and local YCB models"]
+    fn test_headless_throughput_smoke_uses_single_app_for_homogeneous_batch() {
+        let object_dir = Path::new("/tmp/ycb/003_cracker_box");
+        if !object_dir.exists() {
+            eprintln!("Skipping throughput smoke check - /tmp/ycb/003_cracker_box not found");
+            return;
+        }
+
+        let selected_viewpoints: Vec<_> = generate_viewpoints(&ViewpointConfig::default())
+            .into_iter()
+            .take(4)
+            .collect();
+        let rotation = ObjectRotation::identity();
+        let config = RenderConfig::tbp_default();
+
+        crate::render::reset_headless_app_init_count_for_tests();
+        let sequential_start = std::time::Instant::now();
+        let sequential_outputs: Vec<_> = selected_viewpoints
+            .iter()
+            .map(|viewpoint| {
+                render_to_buffer(object_dir, viewpoint, &rotation, &config)
+                    .expect("Sequential smoke render failed")
+            })
+            .collect();
+        let sequential_elapsed = sequential_start.elapsed();
+        let sequential_inits = crate::render::headless_app_init_count_for_tests();
+        assert_eq!(
+            sequential_inits,
+            selected_viewpoints.len(),
+            "Sequential path should build one headless app per viewpoint"
+        );
+
+        let requests: Vec<_> = selected_viewpoints
+            .iter()
+            .map(|viewpoint| BatchRenderRequest {
+                object_dir: object_dir.to_path_buf(),
+                viewpoint: *viewpoint,
+                object_rotation: rotation.clone(),
+                render_config: config.clone(),
+            })
+            .collect();
+
+        crate::render::reset_headless_app_init_count_for_tests();
+        let batch_start = std::time::Instant::now();
+        let batch_outputs = render_batch(requests, &BatchRenderConfig::default())
+            .expect("Batch smoke render failed");
+        let batch_elapsed = batch_start.elapsed();
+        let batch_inits = crate::render::headless_app_init_count_for_tests();
+
+        assert_eq!(
+            batch_outputs.len(),
+            sequential_outputs.len(),
+            "Batch smoke render returned an unexpected number of outputs"
+        );
+        assert_eq!(
+            batch_inits, 1,
+            "Homogeneous batch should build exactly one headless app"
+        );
+
+        for (idx, (batch_output, sequential_output)) in batch_outputs
+            .iter()
+            .zip(sequential_outputs.iter())
+            .enumerate()
+        {
+            assert_eq!(batch_output.request.viewpoint, selected_viewpoints[idx]);
+            assert_eq!(batch_output.request.object_rotation, rotation);
+            assert_eq!(batch_output.width, sequential_output.width);
+            assert_eq!(batch_output.height, sequential_output.height);
+            assert_eq!(batch_output.intrinsics, sequential_output.intrinsics);
+            assert_eq!(batch_output.rgba, sequential_output.rgba);
+
+            let max_depth_delta = batch_output
+                .depth
+                .iter()
+                .zip(sequential_output.depth.iter())
+                .map(|(lhs, rhs)| (lhs - rhs).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                max_depth_delta <= 1e-9,
+                "Depth mismatch at viewpoint {idx}: max delta {max_depth_delta}"
+            );
+        }
+
+        println!(
+            "Sequential smoke: {:.2}s, app_inits={}",
+            sequential_elapsed.as_secs_f64(),
+            sequential_inits
+        );
+        println!(
+            "Batch smoke: {:.2}s, app_inits={}",
+            batch_elapsed.as_secs_f64(),
+            batch_inits
+        );
+
+        if let Ok(raw_budget) = std::env::var("BEVY_SENSOR_HEADLESS_BATCH_BUDGET_SECS") {
+            let budget_secs: f64 = raw_budget
+                .parse()
+                .expect("BEVY_SENSOR_HEADLESS_BATCH_BUDGET_SECS must be numeric");
+            assert!(
+                batch_elapsed.as_secs_f64() <= budget_secs,
+                "Batch smoke render exceeded budget: {:.2}s > {:.2}s",
+                batch_elapsed.as_secs_f64(),
+                budget_secs
+            );
+        }
     }
 
     #[test]
