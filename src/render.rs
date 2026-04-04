@@ -987,11 +987,9 @@ pub fn render_headless(
 
     // Shared buffer for RGBA data from headless render target
     let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
-    let rgba_clone = shared_rgba.clone();
 
     // Shared buffer for depth readback
     let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
-    let depth_clone = shared_depth.clone();
 
     // Create a temp file path for fallback output serialization
     let temp_path =
@@ -1026,47 +1024,7 @@ pub fn render_headless(
 
     // Run Bevy app with HEADLESS configuration (no window surfaces!)
     // Uses ScheduleRunnerPlugin instead of WinitPlugin
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: None, // NO WINDOW - true headless
-                    exit_condition: ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>()
-                .disable::<LogPlugin>()
-                .disable::<TerminalCtrlCHandlerPlugin>(), // Avoid re-registering global process handlers
-        )
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-            1.0 / 60.0,
-        )))
-        .add_plugins(ObjPlugin)
-        .add_plugins(ImageCopyPlugin {
-            shared_rgba: rgba_clone,
-        })
-        .add_plugins(DepthReadbackPlugin {
-            shared_depth: depth_clone,
-            near: config.near_plane,
-            far: config.far_plane,
-        })
-        .insert_resource(request)
-        .insert_resource(output_clone)
-        .insert_resource(shared_rgba)
-        .init_resource::<RenderState>()
-        .add_systems(Startup, setup_headless_scene)
-        .add_systems(
-            Update,
-            (
-                check_assets_loaded,
-                apply_materials,
-                request_headless_capture,
-                check_headless_capture_ready,
-                extract_and_exit_headless,
-            )
-                .chain(),
-        )
-        .run();
+    build_headless_app(request, output_clone, shared_rgba, shared_depth).run();
 
     // App::run() returned - check shared_output for result
     if let Ok(guard) = shared_output.0.lock() {
@@ -1198,6 +1156,59 @@ pub fn render_headless_sequence(
     }
 
     Ok(std::mem::take(&mut batch.outputs))
+}
+
+/// Assemble the shared single-render headless Bevy app.
+fn build_headless_app(
+    request: RenderRequest,
+    shared_output: SharedOutput,
+    shared_rgba: SharedRgbaBuffer,
+    shared_depth: SharedDepthBuffer,
+) -> App {
+    let near = request.config.near_plane;
+    let far = request.config.far_plane;
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<LogPlugin>()
+            .disable::<TerminalCtrlCHandlerPlugin>(),
+    )
+    .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+        1.0 / 60.0,
+    )))
+    .add_plugins(ObjPlugin)
+    .add_plugins(ImageCopyPlugin {
+        shared_rgba: shared_rgba.clone(),
+    })
+    .add_plugins(DepthReadbackPlugin {
+        shared_depth,
+        near,
+        far,
+    })
+    .insert_resource(request)
+    .insert_resource(shared_output)
+    .insert_resource(shared_rgba)
+    .init_resource::<RenderState>()
+    .add_systems(Startup, setup_headless_scene)
+    .add_systems(
+        Update,
+        (
+            check_assets_loaded,
+            apply_materials,
+            request_headless_capture,
+            check_headless_capture_ready,
+            extract_and_exit_headless,
+        )
+            .chain(),
+    );
+    app
 }
 
 /// Serialize RenderOutput to bytes for IPC (used by subprocess mode)
@@ -2063,11 +2074,9 @@ pub fn render_to_files(
 
     // Shared buffer for RGBA data from headless render target
     let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
-    let rgba_clone = shared_rgba.clone();
 
     // Shared buffer for depth readback
     let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
-    let depth_clone = shared_depth.clone();
 
     // Spawn watchdog thread that saves files and exits
     std::thread::spawn(move || {
@@ -2111,47 +2120,7 @@ pub fn render_to_files(
     backend_config.apply_env();
 
     // Run Bevy app with HEADLESS configuration
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>()
-                .disable::<LogPlugin>()
-                .disable::<TerminalCtrlCHandlerPlugin>(),
-        )
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-            1.0 / 60.0,
-        )))
-        .add_plugins(ObjPlugin)
-        .add_plugins(ImageCopyPlugin {
-            shared_rgba: rgba_clone,
-        })
-        .add_plugins(DepthReadbackPlugin {
-            shared_depth: depth_clone,
-            near: config.near_plane,
-            far: config.far_plane,
-        })
-        .insert_resource(request)
-        .insert_resource(shared_output)
-        .insert_resource(shared_rgba)
-        .init_resource::<RenderState>()
-        .add_systems(Startup, setup_headless_scene)
-        .add_systems(
-            Update,
-            (
-                check_assets_loaded,
-                apply_materials,
-                request_headless_capture,
-                check_headless_capture_ready,
-                extract_and_exit_headless,
-            )
-                .chain(),
-        )
-        .run();
+    build_headless_app(request, shared_output, shared_rgba, shared_depth).run();
 
     // Unreachable - watchdog thread exits the process
     Err(RenderError::RenderFailed(
