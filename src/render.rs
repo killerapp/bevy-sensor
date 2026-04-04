@@ -65,6 +65,8 @@ use bevy_obj::ObjPlugin;
 use std::fs::File;
 use std::io::Read as IoRead;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -105,6 +107,19 @@ struct RenderState {
     depth_data: Option<Vec<f64>>,
     image_width: u32,
     image_height: u32,
+}
+
+#[cfg(test)]
+static HEADLESS_SCENE_SETUP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn reset_headless_scene_setup_count() {
+    HEADLESS_SCENE_SETUP_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn headless_scene_setup_count() -> usize {
+    HEADLESS_SCENE_SETUP_COUNT.load(Ordering::SeqCst)
 }
 
 /// Shared buffer for screenshot callback to write into
@@ -1669,6 +1684,9 @@ fn setup_headless_scene(
     request: Res<RenderRequest>,
     mut _materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    #[cfg(test)]
+    HEADLESS_SCENE_SETUP_COUNT.fetch_add(1, Ordering::SeqCst);
+
     let width = request.config.width;
     let height = request.config.height;
 
@@ -2184,4 +2202,133 @@ fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
 
     let bytes: Vec<u8> = depth.iter().flat_map(|f| f.to_le_bytes()).collect();
     std::fs::write(path, &bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod smoke_tests {
+    use super::{headless_scene_setup_count, reset_headless_scene_setup_count};
+    use crate::{
+        BatchRenderConfig, BatchRenderRequest, ObjectRotation, RenderConfig, ViewpointConfig,
+    };
+    use image::{ImageBuffer, Rgba};
+    use tempfile::TempDir;
+
+    fn write_synthetic_object() -> TempDir {
+        let temp_dir = TempDir::new().expect("create temp dir for synthetic object");
+        let object_dir = temp_dir.path().join("synthetic_cube").join("google_16k");
+        std::fs::create_dir_all(&object_dir).expect("create synthetic google_16k dir");
+
+        // A small centered cube stays visible from all default TBP viewpoints and does not
+        // need any YCB downloads.
+        let obj = r#"o SyntheticCube
+v -0.10 -0.10  0.10
+v  0.10 -0.10  0.10
+v  0.10  0.10  0.10
+v -0.10  0.10  0.10
+v -0.10 -0.10 -0.10
+v  0.10 -0.10 -0.10
+v  0.10  0.10 -0.10
+v -0.10  0.10 -0.10
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+f 1/1 2/2 3/3
+f 1/1 3/3 4/4
+f 6/1 5/2 8/3
+f 6/1 8/3 7/4
+f 2/1 6/2 7/3
+f 2/1 7/3 3/4
+f 5/1 1/2 4/3
+f 5/1 4/3 8/4
+f 4/1 3/2 7/3
+f 4/1 7/3 8/4
+f 5/1 6/2 2/3
+f 5/1 2/3 1/4
+"#;
+        std::fs::write(object_dir.join("textured.obj"), obj).expect("write synthetic obj");
+
+        let texture = ImageBuffer::from_fn(2, 2, |x, y| match (x, y) {
+            (0, 0) => Rgba([255u8, 48, 48, 255]),
+            (1, 0) => Rgba([48u8, 255, 48, 255]),
+            (0, 1) => Rgba([48u8, 48, 255, 255]),
+            _ => Rgba([255u8, 255, 64, 255]),
+        });
+        texture
+            .save(object_dir.join("texture_map.png"))
+            .expect("write synthetic texture");
+
+        temp_dir
+    }
+
+    #[test]
+    #[ignore = "headless throughput smoke check is opt-in because it needs a local render backend"]
+    fn test_headless_batch_throughput_smoke() {
+        crate::initialize();
+        reset_headless_scene_setup_count();
+
+        let object_root = write_synthetic_object();
+        let object_dir = object_root.path().join("synthetic_cube");
+        let viewpoints = crate::generate_viewpoints(&ViewpointConfig::default());
+        let request_count = 5usize;
+        let config = RenderConfig::tbp_default();
+
+        let requests: Vec<_> = viewpoints
+            .iter()
+            .take(request_count)
+            .copied()
+            .map(|viewpoint| BatchRenderRequest {
+                object_dir: object_dir.clone(),
+                viewpoint,
+                object_rotation: ObjectRotation::identity(),
+                render_config: config.clone(),
+            })
+            .collect();
+
+        let start = std::time::Instant::now();
+        let outputs = crate::render_batch(requests, &BatchRenderConfig::default())
+            .expect("synthetic headless batch render should succeed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(outputs.len(), request_count);
+        // This is the deterministic churn signal for the smoke check. Adapter log lines vary by
+        // backend and logging config, but a homogeneous batch should still set up headless scene
+        // state exactly once.
+        assert_eq!(
+            headless_scene_setup_count(),
+            1,
+            "homogeneous batch smoke check should reuse one headless app setup"
+        );
+
+        for (idx, output) in outputs.iter().enumerate() {
+            assert_eq!(output.width, config.width, "output {idx} width mismatch");
+            assert_eq!(output.height, config.height, "output {idx} height mismatch");
+            assert_eq!(
+                output.rgba.len(),
+                (config.width * config.height * 4) as usize,
+                "output {idx} rgba size mismatch"
+            );
+            assert_eq!(
+                output.depth.len(),
+                (config.width * config.height) as usize,
+                "output {idx} depth size mismatch"
+            );
+            assert!(
+                output
+                    .rgba
+                    .chunks_exact(4)
+                    .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0),
+                "output {idx} should contain visible color"
+            );
+        }
+
+        // Acceptance target: under llvmpipe-class CPU rendering, five 64x64 captures should
+        // finish in under 8s. Much slower runs usually mean we reintroduced per-capture app
+        // churn or another headless startup regression.
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "5 synthetic headless captures took {:.2}s, expected < 8.0s",
+            elapsed.as_secs_f64()
+        );
+    }
 }
