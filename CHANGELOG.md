@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9](https://github.com/killerapp/bevy-sensor/compare/v0.4.8...v0.4.9) - 2026-04-04
+
+### Fixed
+
+- *(render)* guard backend env init with OnceLock to prevent repeated wgpu env writes
+
+### Other
+
+- Add headless throughput smoke test
+- Deduplicate single-render headless app setup
+- release v0.4.8
+
 ## [0.4.8](https://github.com/killerapp/bevy-sensor/compare/v0.4.7...v0.4.8) - 2026-03-28
 
 ### Added
