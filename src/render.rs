@@ -67,7 +67,7 @@ use std::io::Read as IoRead;
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput};
@@ -2133,9 +2133,16 @@ pub fn render_to_files(
         }
     });
 
-    // Configure rendering backend for this environment
-    let backend_config = BackendConfig::headless();
-    backend_config.apply_env();
+    // Configure rendering backend for this environment.
+    // Use OnceLock so env vars are only set once per process — repeated calls
+    // (e.g. sequential render_to_buffer calls in a parity loop) no longer trigger
+    // redundant wgpu backend env writes. Full GPU adapter reuse across App instances
+    // requires a persistent renderer (tracked in issue #14).
+    static BACKEND_INIT: OnceLock<()> = OnceLock::new();
+    BACKEND_INIT.get_or_init(|| {
+        let backend_config = BackendConfig::headless();
+        backend_config.apply_env();
+    });
 
     // Run Bevy app with HEADLESS configuration
     build_headless_app(request, shared_output, shared_rgba, shared_depth).run();
