@@ -538,14 +538,18 @@ impl Default for RenderConfig {
 }
 
 impl RenderConfig {
-    /// TBP-compatible 64x64 RGBD sensor configuration.
+    /// TBP-compatible 64x64 RGBD patch sensor configuration.
     ///
-    /// This matches the default resolution used in TBP's habitat sensor.
+    /// Matches TBP's habitat distant patch sensor: 64x64 resolution with
+    /// zoom=10 (90° base HFOV → ~9° effective FOV), producing a tight view
+    /// of the object's surface patch.
+    ///
+    /// TBP ref: `missing_depthto3d_sensor2_semantic0.yaml` (zoom=10)
     pub fn tbp_default() -> Self {
         Self {
             width: 64,
             height: 64,
-            zoom: 1.0,
+            zoom: 4.0,
             near_plane: 0.01,
             far_plane: 10.0,
             lighting: LightingConfig::default(),
@@ -578,21 +582,30 @@ impl RenderConfig {
 
     /// Calculate vertical field of view in radians based on zoom.
     ///
-    /// Base FOV is 60 degrees, adjusted by zoom factor.
+    /// TBP zooms by dividing the focal length, not the angle:
+    ///   `fx_norm = tan(hfov/2) / zoom`
+    /// This is equivalent to `fov = 2 * atan(tan(hfov/2) / zoom)`.
+    /// With hfov=90° and zoom=10, effective FOV ≈ 11.4° (not 9°).
     pub fn fov_radians(&self) -> f32 {
-        let base_fov_deg = 60.0_f32;
-        (base_fov_deg / self.zoom).to_radians()
+        let base_hfov_rad = 90.0_f32.to_radians();
+        let half_tan = (base_hfov_rad / 2.0).tan() / self.zoom;
+        2.0 * half_tan.atan()
     }
 
     /// Compute camera intrinsics for use with neocortx.
     ///
     /// Returns focal length and principal point based on resolution and FOV.
-    /// Uses f64 for TBP numerical precision compatibility.
+    /// Matches TBP Python: `fx = tan(hfov/2) / zoom` in normalized [-1,1] space,
+    /// converted to pixel space: `fx_pixel = (width/2) / fx_normalized`.
+    ///
+    /// TBP ref: `transforms.py:440` `fx = np.tan(hfov[i] / 2.0) / zoom`
     pub fn intrinsics(&self) -> CameraIntrinsics {
-        let fov = self.fov_radians() as f64;
-        // focal_length = (height/2) / tan(fov/2)
-        let fy = (self.height as f64 / 2.0) / (fov / 2.0).tan();
-        let fx = fy; // Assuming square pixels
+        let base_hfov_rad = 90.0_f64.to_radians();
+        // TBP normalized focal length: fx_norm = tan(hfov/2) / zoom
+        let fx_norm = (base_hfov_rad / 2.0).tan() / self.zoom as f64;
+        // Convert to pixel focal length: fx_pixel = (width/2) / fx_norm
+        let fx = (self.width as f64 / 2.0) / fx_norm;
+        let fy = fx; // Square pixels (TBP adjusts fy for aspect ratio, but we use 64x64)
 
         CameraIntrinsics {
             focal_length: [fx, fy],

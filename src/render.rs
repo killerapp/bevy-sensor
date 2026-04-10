@@ -1379,12 +1379,20 @@ fn setup_scene(
 ) {
     // Camera with depth prepass (Bevy 0.15+ uses Camera3d component)
     // Disable MSAA for depth readback compatibility (can't copy from multisampled texture)
+    // Apply FOV from RenderConfig so the projection matches TBP's camera intrinsics.
+    let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
         Camera {
             hdr: true,
             ..default()
         },
+        Projection::Perspective(PerspectiveProjection {
+            fov,
+            near: request.config.near_plane,
+            far: request.config.far_plane,
+            ..default()
+        }),
         Msaa::Off,
         request.camera_transform,
         Tonemapping::None, // Accurate colors for software rendering
@@ -1743,6 +1751,7 @@ fn setup_headless_scene(
     commands.insert_resource(RenderTargetImage(render_target_handle.clone()));
 
     // Camera rendering to the image texture (NO window!)
+    let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
         Camera {
@@ -1750,6 +1759,12 @@ fn setup_headless_scene(
             target: RenderTarget::Image(render_target_handle.clone()),
             ..default()
         },
+        Projection::Perspective(PerspectiveProjection {
+            fov,
+            near: request.config.near_plane,
+            far: request.config.far_plane,
+            ..default()
+        }),
         Msaa::Off,
         request.camera_transform,
         Tonemapping::None,
