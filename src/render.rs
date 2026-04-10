@@ -1023,7 +1023,7 @@ pub fn render_headless(
     // Spawn watchdog thread that monitors for timeout (don't exit - let Bevy exit gracefully)
     let output_poll_for_timeout = shared_output.clone();
     std::thread::spawn(move || {
-        let timeout = std::time::Duration::from_secs(60);
+        let timeout = std::time::Duration::from_secs(180);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(100);
 
@@ -1037,7 +1037,7 @@ pub fn render_headless(
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Error: Render timeout after 60 seconds");
+                eprintln!("Error: Render timeout after 180 seconds");
                 eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
                 // Force exit on timeout (this is a failure case)
                 std::process::exit(1);
@@ -1163,12 +1163,12 @@ pub fn render_headless_sequence(
     app.finish();
     app.cleanup();
 
-    let timeout = std::time::Duration::from_secs(60);
+    let timeout = std::time::Duration::from_secs(180);
     let start = std::time::Instant::now();
 
     loop {
         if start.elapsed() > timeout {
-            return Err(RenderError::RenderTimeout { duration_secs: 60 });
+            return Err(RenderError::RenderTimeout { duration_secs: 180 });
         }
 
         app.update();
@@ -2115,7 +2115,7 @@ pub fn render_to_files(
 
     // Spawn watchdog thread that saves files and exits
     std::thread::spawn(move || {
-        let timeout = std::time::Duration::from_secs(60);
+        let timeout = std::time::Duration::from_secs(180);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(100);
 
@@ -2141,7 +2141,7 @@ pub fn render_to_files(
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Error: Render timeout after 60 seconds");
+                eprintln!("Error: Render timeout after 180 seconds");
                 eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
                 std::process::exit(1);
             }
