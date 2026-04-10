@@ -977,6 +977,16 @@ pub fn render_headless(
     object_rotation: &ObjectRotation,
     config: &RenderConfig,
 ) -> Result<RenderOutput, RenderError> {
+    // Canonicalize paths so Bevy's asset server can find them regardless of
+    // caller working directory. Relative paths like "../../ycb" pass the
+    // exists() check but Bevy resolves assets against its own root.
+    let object_dir = std::fs::canonicalize(object_dir).map_err(|e| {
+        RenderError::RenderFailed(format!(
+            "Cannot canonicalize object directory {}: {}",
+            object_dir.display(),
+            e
+        ))
+    })?;
     let mesh_path = object_dir.join("google_16k/textured.obj");
     let texture_path = object_dir.join("google_16k/texture_map.png");
 
@@ -1075,6 +1085,13 @@ pub fn render_headless_sequence(
         return Ok(Vec::new());
     }
 
+    let object_dir = std::fs::canonicalize(object_dir).map_err(|e| {
+        RenderError::RenderFailed(format!(
+            "Cannot canonicalize object directory {}: {}",
+            object_dir.display(),
+            e
+        ))
+    })?;
     let mesh_path = object_dir.join("google_16k/textured.obj");
     let texture_path = object_dir.join("google_16k/texture_map.png");
 
