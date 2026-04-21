@@ -1267,8 +1267,19 @@ pub fn render_headless_sequence(
     // Manual app.update() loops do not run plugin finish/cleanup hooks automatically.
     // Bevy's screenshot plugin inserts CapturedScreenshots during finish(), so run the
     // normal startup phases before driving the headless batch loop ourselves.
+    let trace_outer = render_trace_enabled();
+    let t_finish = std::time::Instant::now();
     app.finish();
+    let finish_ms = t_finish.elapsed().as_secs_f64() * 1000.0;
+    let t_cleanup = std::time::Instant::now();
     app.cleanup();
+    let cleanup_ms = t_cleanup.elapsed().as_secs_f64() * 1000.0;
+    if trace_outer {
+        eprintln!(
+            "[render_trace][coldinit] app.finish ms={:.3} app.cleanup ms={:.3}",
+            finish_ms, cleanup_ms
+        );
+    }
 
     let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
     let start = std::time::Instant::now();
@@ -1619,6 +1630,10 @@ fn check_assets_loaded(
     scene: Option<Res<LoadedScene>>,
     texture: Option<Res<LoadedTexture>>,
 ) {
+    let trace = render_trace_enabled();
+    let was_scene_loaded = state.scene_loaded;
+    let was_texture_loaded = state.texture_loaded;
+
     state.frame_count += 1;
 
     if state.scene_loaded && state.texture_loaded {
@@ -1642,6 +1657,21 @@ fn check_assets_loaded(
             }
             Some(LoadState::Failed(_)) => {}
             _ => {}
+        }
+    }
+
+    if trace {
+        if !was_scene_loaded && state.scene_loaded {
+            eprintln!(
+                "[render_trace][coldinit] scene_loaded frame_count={}",
+                state.frame_count
+            );
+        }
+        if !was_texture_loaded && state.texture_loaded {
+            eprintln!(
+                "[render_trace][coldinit] texture_loaded frame_count={}",
+                state.frame_count
+            );
         }
     }
 }
@@ -1685,7 +1715,14 @@ fn apply_materials(
     // Wait more frames after applying materials
     // Software rendering (llvmpipe) needs more frames to fully render
     if state.frame_count >= 60 {
+        let was_ready = state.capture_ready;
         state.capture_ready = true;
+        if render_trace_enabled() && !was_ready {
+            eprintln!(
+                "[render_trace][coldinit] capture_ready frame_count={}",
+                state.frame_count
+            );
+        }
     }
 }
 
@@ -1867,6 +1904,9 @@ fn setup_headless_scene(
     request: Res<RenderRequest>,
     mut _materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let trace = render_trace_enabled();
+    let t0 = trace.then(std::time::Instant::now);
+
     #[cfg(test)]
     HEADLESS_SCENE_SETUP_COUNT.fetch_add(1, Ordering::SeqCst);
 
@@ -1985,6 +2025,13 @@ fn setup_headless_scene(
         Transform::from_rotation(request.object_rotation.to_quat()),
         RenderedObject,
     ));
+
+    if let Some(t0) = t0 {
+        eprintln!(
+            "[render_trace][startup] setup_headless_scene ms={:.3}",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Request capture for headless rendering (enable ImageCopier)
