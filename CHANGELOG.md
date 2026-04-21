@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/killerapp/bevy-sensor/compare/v0.4.9...v0.4.10) - 2026-04-21
+
+### Fixed
+
+- *(render)* apply configured FOV to camera projection and match TBP intrinsics
+- *(render)* increase hardcoded render timeout from 60s to 180s
+- *(render)* canonicalize object paths before passing to Bevy asset server
+
+### Other
+
+- *(render)* extract RENDER_TIMEOUT_SECS constant from six duplicated sites
+- *(render)* replace magic-number assertions with formula invariants
+
 ## [0.4.9](https://github.com/killerapp/bevy-sensor/compare/v0.4.8...v0.4.9) - 2026-04-04
 
 ### Fixed
