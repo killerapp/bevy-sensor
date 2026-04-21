@@ -183,6 +183,15 @@ pub enum BatchRenderError {
     QueueFull,
     /// No renders queued
     EmptyQueue,
+    /// The wgpu device was lost mid-render. The current `RenderSession::render()`
+    /// call produced no output; any outputs returned by earlier calls remain valid.
+    /// Recovery: drop the session and construct a new one.
+    ///
+    /// `reason` is a string form of `wgpu::DeviceLostReason` so callers can branch
+    /// on recoverable vs. adapter-evicted without taking a direct wgpu dependency.
+    /// Phase 1 ships the string form; a typed variant may follow once the Bevy
+    /// re-export surface is clearer.
+    DeviceLost { reason: String, message: String },
 }
 
 impl std::fmt::Display for BatchRenderError {
@@ -199,6 +208,9 @@ impl std::fmt::Display for BatchRenderError {
             BatchRenderError::InvalidConfig(msg) => write!(f, "Invalid batch config: {}", msg),
             BatchRenderError::QueueFull => write!(f, "Batch queue is full"),
             BatchRenderError::EmptyQueue => write!(f, "No renders queued"),
+            BatchRenderError::DeviceLost { reason, message } => {
+                write!(f, "wgpu device lost ({}): {}", reason, message)
+            }
         }
     }
 }
