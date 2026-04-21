@@ -260,10 +260,13 @@ fn test_batch_render_matches_sequential_episode_outputs() {
 /// binary). Root cause is unresolved; tracked as a follow-up after Phase 1
 /// lands.
 ///
-/// Consequence: the in-repo gate is set at **≥1.5×** — enough to catch gross
-/// regressions (e.g. accidentally rebuilding the App per-call), but calibrated
-/// to the test-binary's compressed dynamic range. Trust the downstream canary
-/// for the real number.
+/// Consequence: the in-repo gate is set at **≥1.2×** — high enough above 1.0×
+/// to catch the class of regression where session state is accidentally
+/// destroyed between calls (which would drop speedup toward 1.0×), low enough
+/// to clear observed run-to-run jitter (1 of 5 sampled runs on DX12 came in at
+/// 1.4× from thermal / driver scheduling noise — see PR #58). The gate exists
+/// to detect regressions, not to re-prove the speedup; 8.85× lives in the
+/// downstream canary and that's authoritative.
 ///
 /// # Workload
 ///
@@ -425,14 +428,17 @@ fn test_session_vs_fresh_n_batch_smoke() {
     println!();
     println!("  Speedup:   {:.1}×", speedup);
 
-    // Gate is ≥1.5× in the test binary. The downstream canary (neocortx
-    // parity-gate) shows 8.85× end-to-end; the test-binary under-reports by
-    // ~5× for reasons documented on the test's docstring.
+    // Gate is ≥1.2× in the test binary — regression detection only. The
+    // downstream canary (neocortx parity-gate) shows 8.85× end-to-end; the
+    // test-binary under-reports by ~5× for reasons documented on the docstring.
+    // 1.2× is chosen over 1.5× because DX12 thermal / scheduling jitter was
+    // observed to dip to 1.4× on 1 of 5 sampled runs on otherwise-correct code.
     assert!(
-        speedup >= 1.5,
+        speedup >= 1.2,
         "session-vs-fresh speedup was only {:.1}× at N={} × 24 vp \
-         (session {:.1} ms, fresh {:.1} ms); in-repo gate requires ≥1.5× \
-         (downstream canary shows 8.85× — see #58)",
+         (session {:.1} ms, fresh {:.1} ms); in-repo gate requires ≥1.2× \
+         (downstream canary shows 8.85× — see #58). Speedup < 1.2× suggests \
+         session state is being destroyed between calls.",
         speedup,
         n,
         session_total_ms,
