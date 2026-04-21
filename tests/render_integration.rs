@@ -358,12 +358,8 @@ fn test_session_vs_fresh_n_batch_smoke() {
     let mut fresh_outputs_last = Vec::new();
     for (i, requests) in per_object_requests.iter().enumerate() {
         let t = Instant::now();
-        let outs = render_batch(requests.clone(), &batch_config).unwrap_or_else(|e| {
-            panic!(
-                "fresh render_batch {i} ({}) failed: {e:?}",
-                object_ids[i]
-            )
-        });
+        let outs = render_batch(requests.clone(), &batch_config)
+            .unwrap_or_else(|e| panic!("fresh render_batch {i} ({}) failed: {e:?}", object_ids[i]));
         let call_ms = t.elapsed().as_secs_f64() * 1000.0;
         fresh_per_call_ms.push(call_ms);
         if i == n - 1 {

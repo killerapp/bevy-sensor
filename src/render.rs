@@ -2595,11 +2595,12 @@ impl RenderSession {
         // Enforce homogeneity and config invariance.
         let first = &requests[0];
         if first.render_config != self.render_config {
-            return Err(BatchRenderError::InvalidConfig(format!(
+            return Err(BatchRenderError::InvalidConfig(
                 "RenderSession render_config mismatch: session was constructed with a different \
                  RenderConfig than the first request carries. Session config cannot change after \
                  `new()`; construct a new session if you need a different resolution/camera."
-            )));
+                    .to_string(),
+            ));
         }
         for r in &requests[1..] {
             if r.object_dir != first.object_dir
@@ -2682,9 +2683,9 @@ impl RenderSession {
             // Kick off asset loads and install the handles under the names the
             // existing `check_assets_loaded` system expects.
             let asset_server = world.resource::<AssetServer>().clone();
-            let scene_handle: Handle<Scene> = asset_server.load(&mesh_path.display().to_string());
+            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
             let texture_handle: Handle<Image> =
-                asset_server.load(&texture_path.display().to_string());
+                asset_server.load(texture_path.display().to_string());
             world.insert_resource(LoadedScene(scene_handle.clone()));
             world.insert_resource(LoadedTexture(texture_handle));
 
@@ -2734,10 +2735,7 @@ impl RenderSession {
 
         // Collect outputs and zip with requests to produce BatchRenderOutput in
         // request order.
-        let mut sequence = self
-            .app
-            .world_mut()
-            .resource_mut::<HeadlessBatchSequence>();
+        let mut sequence = self.app.world_mut().resource_mut::<HeadlessBatchSequence>();
         if sequence.outputs.len() != requests.len() {
             return Err(BatchRenderError::TotalFailure(format!(
                 "RenderSession produced {} outputs for {} requests",
