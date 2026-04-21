@@ -79,6 +79,16 @@ use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, R
 /// can take well over 60s on a cold GPU cache (see commit 9cd1d11).
 const RENDER_TIMEOUT_SECS: u64 = 180;
 
+/// Warmup frames after each camera move in `render_headless_sequence`.
+///
+/// After writing a new camera `Transform`, Bevy needs at least one frame for
+/// transform propagation + render-world extract before the next capture is
+/// valid. Historically set to 3 as a conservative cushion; reducing directly
+/// shortens per-viewpoint wall-clock since `app.update()` in the batch path
+/// is not rate-limited. Validated against the pixel-exact hardware test
+/// `test_batch_render_matches_sequential_episode_outputs`.
+const BATCH_WARMUP_FRAMES: u32 = 1;
+
 /// Check if a display is available for windowed rendering.
 ///
 /// Returns true if DISPLAY or WAYLAND_DISPLAY environment variable is set.
@@ -1176,6 +1186,11 @@ pub fn render_headless_sequence(
     let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
     let start = std::time::Instant::now();
 
+    let trace = std::env::var("BEVY_SENSOR_RENDER_TRACE").is_ok();
+    let mut update_idx: u32 = 0;
+    let mut last_completed_outputs: usize = 0;
+    let mut viewpoint_start = std::time::Instant::now();
+
     loop {
         if start.elapsed() > timeout {
             return Err(RenderError::RenderTimeout {
@@ -1183,11 +1198,44 @@ pub fn render_headless_sequence(
             });
         }
 
+        let update_start = std::time::Instant::now();
         app.update();
+        let update_elapsed_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+
+        if trace {
+            let batch = app.world().resource::<HeadlessBatchSequence>();
+            let warmup = batch.warmup_frames_remaining;
+            let current = batch.current_index;
+            let completed = batch.outputs.len();
+            let vp_ms = viewpoint_start.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "[render_trace] update={update_idx} vp={current} warmup={warmup} \
+                 completed={completed} update_ms={update_elapsed_ms:.2} vp_ms={vp_ms:.2}"
+            );
+            if completed > last_completed_outputs {
+                eprintln!(
+                    "[render_trace] viewpoint {} finished in {:.2} ms",
+                    completed - 1,
+                    vp_ms
+                );
+                last_completed_outputs = completed;
+                viewpoint_start = std::time::Instant::now();
+            }
+        }
+
+        update_idx += 1;
 
         if app.world().resource::<HeadlessBatchSequence>().done {
             break;
         }
+    }
+
+    if trace {
+        eprintln!(
+            "[render_trace] total_wall_ms={:.2} updates={update_idx} viewpoints={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            viewpoints.len()
+        );
     }
 
     let mut batch = app.world_mut().resource_mut::<HeadlessBatchSequence>();
@@ -2063,7 +2111,7 @@ fn extract_and_continue_headless_batch(
         }
 
         batch.current_index = next_index;
-        batch.warmup_frames_remaining = 3;
+        batch.warmup_frames_remaining = BATCH_WARMUP_FRAMES;
 
         if let Some(next_viewpoint) = batch.current_viewpoint() {
             for mut camera_transform in camera_query.iter_mut() {
