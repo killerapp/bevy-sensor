@@ -121,6 +121,10 @@ struct RenderState {
     scene_loaded: bool,
     texture_loaded: bool,
     materials_applied: bool,
+    /// `frame_count` at the moment materials were applied; used to gate
+    /// `capture_ready` on N frames of render-graph propagation rather than
+    /// a legacy llvmpipe-era 60-frame wait.
+    materials_applied_frame: u32,
     capture_ready: bool,
     screenshot_requested: bool,
     captured: bool,
@@ -1690,15 +1694,15 @@ fn apply_materials(
 
     state.frame_count += 1;
 
-    // Wait a few frames for everything to settle
-    if state.frame_count < 10 {
-        return;
-    }
-
     let Some(tex) = texture else { return };
 
     if !state.materials_applied {
-        // Create and assign the textured material once, then let the scene warm up.
+        // The scene hierarchy is instantiated asynchronously after the asset
+        // load event fires; wait until mesh entities exist before applying.
+        if mesh_query.is_empty() {
+            return;
+        }
+
         let textured_material = materials.add(StandardMaterial {
             base_color_texture: Some(tex.0.clone()),
             unlit: true,
@@ -1710,11 +1714,13 @@ fn apply_materials(
         }
 
         state.materials_applied = true;
+        state.materials_applied_frame = state.frame_count;
     }
 
-    // Wait more frames after applying materials
-    // Software rendering (llvmpipe) needs more frames to fully render
-    if state.frame_count >= 60 {
+    // Two frames after material application is enough for the render graph
+    // to pick up the new material on native GPU. The previous 60-frame gate
+    // was a legacy llvmpipe software-rendering cushion.
+    if state.frame_count >= state.materials_applied_frame + 2 {
         let was_ready = state.capture_ready;
         state.capture_ready = true;
         if render_trace_enabled() && !was_ready {
