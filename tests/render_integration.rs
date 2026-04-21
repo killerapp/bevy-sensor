@@ -19,7 +19,7 @@
 use bevy_sensor::{
     backend::detect_platform, batch::BatchRenderRequest, cache::ModelCache, render_batch,
     render_to_buffer, render_to_buffer_cached, BatchRenderConfig, ObjectRotation, RenderConfig,
-    RenderOutput, ViewpointConfig,
+    RenderOutput, RenderSession, ViewpointConfig,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -238,6 +238,102 @@ fn test_batch_render_matches_sequential_episode_outputs() {
         batch_outputs.len()
     );
     println!("✓ Batch and sequential outputs matched");
+}
+
+/// Smoke gate for the RenderSession PSO-cache hypothesis (#54).
+///
+/// Constructs a single RenderSession, then calls `render()` twice back-to-back
+/// with the same homogeneous request. If holding the `bevy::App` (and thus the
+/// wgpu `RenderDevice` and its pipeline-state-object cache) alive across calls
+/// does what the cold-init trace (#55 comment) suggested, the second call should
+/// be at least 10× faster than the first.
+///
+/// This test gates the rest of Phase 1. If it fails, RenderSession is abandoned
+/// and #54 is closed for good — we've misdiagnosed the dominant cost.
+///
+/// Requires native GPU (WSL2 cannot run).
+#[test]
+#[ignore]
+fn test_session_warm_vs_cold_smoke() {
+    println!("\n=== RenderSession warm-vs-cold smoke gate ===");
+
+    let object_dir = PathBuf::from("/tmp/ycb/003_cracker_box");
+    if !object_dir.exists() {
+        println!("⚠ Skipping - YCB models not found");
+        return;
+    }
+
+    let viewpoint_config = ViewpointConfig::default();
+    let viewpoints = bevy_sensor::generate_viewpoints(&viewpoint_config);
+    let selected: Vec<_> = viewpoints.into_iter().take(3).collect();
+    let rotation = ObjectRotation::identity();
+    let config = RenderConfig::tbp_default();
+
+    let mut session = RenderSession::new(&config).expect("session init failed");
+
+    let requests: Vec<_> = selected
+        .iter()
+        .map(|vp| BatchRenderRequest {
+            object_dir: object_dir.clone(),
+            viewpoint: *vp,
+            object_rotation: rotation.clone(),
+            render_config: config.clone(),
+        })
+        .collect();
+
+    let cold_start = Instant::now();
+    let cold_outputs = session.render(&requests).expect("cold render failed");
+    let cold_elapsed = cold_start.elapsed();
+
+    let warm_start = Instant::now();
+    let warm_outputs = session.render(&requests).expect("warm render failed");
+    let warm_elapsed = warm_start.elapsed();
+
+    assert_eq!(cold_outputs.len(), requests.len());
+    assert_eq!(warm_outputs.len(), requests.len());
+
+    // Correctness: warm call must produce identical output.
+    for (idx, (cold, warm)) in cold_outputs.iter().zip(warm_outputs.iter()).enumerate() {
+        assert_eq!(cold.width, warm.width);
+        assert_eq!(cold.height, warm.height);
+        assert_eq!(
+            cold.rgba, warm.rgba,
+            "RGBA mismatch at viewpoint {idx} between cold and warm"
+        );
+        let max_depth_delta = cold
+            .depth
+            .iter()
+            .zip(warm.depth.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_depth_delta <= 1e-9,
+            "Depth mismatch at viewpoint {idx}: max delta {max_depth_delta}"
+        );
+    }
+
+    let cold_ms = cold_elapsed.as_secs_f64() * 1000.0;
+    let warm_ms = warm_elapsed.as_secs_f64() * 1000.0;
+    let speedup = cold_ms / warm_ms.max(1e-3);
+
+    println!("  Cold call: {:.1} ms ({} viewpoints)", cold_ms, requests.len());
+    println!("  Warm call: {:.1} ms ({} viewpoints)", warm_ms, requests.len());
+    println!("  Speedup:   {:.1}×", speedup);
+
+    // The gate: a ≥10× speedup validates that PSO cache + device + asset
+    // handles all stay warm across render() calls on the same session.
+    // Anything less means we've misdiagnosed the dominant cost and Phase 1
+    // should not proceed.
+    assert!(
+        speedup >= 10.0,
+        "warm-vs-cold speedup was only {:.1}× (cold {:.1} ms, warm {:.1} ms); \
+         Phase 1 gate requires ≥10×",
+        speedup,
+        cold_ms,
+        warm_ms
+    );
+
+    println!("✓ RenderSession warm-vs-cold smoke gate PASSED");
 }
 
 #[test]

@@ -970,6 +970,10 @@ pub use batch::{
     BatchState, RenderStatus,
 };
 
+/// Persistent batch render session. See the module docs in `render::RenderSession`
+/// for lifetime, thread-affinity, and config-invariance guarantees.
+pub use render::RenderSession;
+
 /// Create a new batch renderer helper for multi-viewpoint workflows.
 ///
 /// The current implementation stores queued requests and executes them sequentially via

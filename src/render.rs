@@ -2356,6 +2356,397 @@ fn extract_and_continue_headless_batch(
     }
 }
 
+// ============================================================================
+// Persistent batch session (RenderSession)
+//
+// Amortizes wgpu device creation, Bevy app setup, and first-draw pipeline state
+// object (PSO) compilation across multiple `render()` calls. Profile data (see
+// issues #54 and #55) showed that on a 60-episode parity-gate, ~2.3s per episode
+// lives in first-draw DX12 PSO compilation, totalling ~131s of 151s wall-clock.
+// Keeping the `App` (and thus the `RenderDevice` and its PSO cache) alive across
+// episodes recovers the bulk of that cost.
+// ============================================================================
+
+/// Marker for the per-group scene entity so we can despawn it cleanly when the
+/// next `RenderSession::render()` call swaps in a different object or rotation.
+#[derive(Component)]
+struct SessionScene;
+
+/// Session-persistent setup: render target image, camera (with prepass +
+/// `ImageCopier`), ambient light, key + fill lights. Everything here lives for
+/// the full lifetime of the `RenderSession`; per-group work (mesh/texture load,
+/// scene entity spawn) happens outside Startup in `RenderSession::render()`.
+fn setup_session_persistent_scene(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    config: Res<SessionRenderConfig>,
+) {
+    let width = config.0.width;
+    let height = config.0.height;
+
+    let size = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+
+    let mut render_target_image = Image::new_fill(
+        size,
+        TextureDimension::D2,
+        &[0, 0, 0, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    render_target_image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
+
+    let render_target_handle = images.add(render_target_image);
+    commands.insert_resource(RenderTargetImage(render_target_handle.clone()));
+
+    let fov = config.0.fov_radians();
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            hdr: true,
+            target: RenderTarget::Image(render_target_handle.clone()),
+            ..default()
+        },
+        Projection::Perspective(PerspectiveProjection {
+            fov,
+            near: config.0.near_plane,
+            far: config.0.far_plane,
+            ..default()
+        }),
+        Msaa::Off,
+        Transform::default(),
+        Tonemapping::None,
+        DepthPrepass,
+        NormalPrepass,
+        RenderCamera,
+        ImageCopier {
+            src_image: render_target_handle,
+            enabled: false,
+        },
+    ));
+
+    let lighting = &config.0.lighting;
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: lighting.ambient_brightness,
+    });
+
+    if lighting.key_light_intensity > 0.0 {
+        commands.spawn((
+            PointLight {
+                intensity: lighting.key_light_intensity,
+                shadows_enabled: lighting.shadows_enabled,
+                ..default()
+            },
+            Transform::from_xyz(
+                lighting.key_light_position[0],
+                lighting.key_light_position[1],
+                lighting.key_light_position[2],
+            ),
+        ));
+    }
+
+    if lighting.fill_light_intensity > 0.0 {
+        commands.spawn((
+            PointLight {
+                intensity: lighting.fill_light_intensity,
+                shadows_enabled: lighting.shadows_enabled,
+                ..default()
+            },
+            Transform::from_xyz(
+                lighting.fill_light_position[0],
+                lighting.fill_light_position[1],
+                lighting.fill_light_position[2],
+            ),
+        ));
+    }
+}
+
+/// Resource carrying the `RenderConfig` that was fixed at session construction.
+/// Used by `setup_session_persistent_scene` to size the render target.
+#[derive(Resource)]
+struct SessionRenderConfig(RenderConfig);
+
+/// Persistent batch render session. Keeps a Bevy `App` (and its `RenderDevice`
+/// plus PSO cache) alive across multiple `render()` calls, amortizing per-episode
+/// cold-init cost.
+///
+/// # Thread affinity
+///
+/// `RenderSession` must be created, used, and dropped on the same thread. It
+/// holds a `bevy::App` which owns GPU resources that are not safe to move
+/// across threads. The `!Send + !Sync` marker is enforced via
+/// `PhantomData<*const ()>`.
+///
+/// # Config invariant
+///
+/// The `RenderConfig` (resolution, lighting, near/far, fov) is fixed at
+/// `new()`. All `render()` calls must use requests whose `render_config`
+/// matches; heterogeneous configs are rejected.
+///
+/// # Phase 1 limitation
+///
+/// Each `render()` call must contain homogeneous requests (same `object_dir`
+/// and `object_rotation`). Heterogeneous calls return
+/// `BatchRenderError::InvalidConfig`. Hold a single `RenderSession` and call
+/// `render()` once per episode to amortize setup across episodes.
+pub struct RenderSession {
+    app: App,
+    render_config: RenderConfig,
+    shared_rgba: SharedRgbaBuffer,
+    shared_depth: SharedDepthBuffer,
+    _not_send_sync: std::marker::PhantomData<*const ()>,
+}
+
+impl RenderSession {
+    /// Build the App, run plugin `finish()`/`cleanup()`, and perform one warmup
+    /// `update()` so Startup systems run and the wgpu device + adapter are
+    /// initialized. The first `render()` call still pays PSO compilation for
+    /// the specific mesh/material combination; subsequent calls reuse the cache.
+    pub fn new(render_config: &crate::RenderConfig) -> Result<Self, crate::RenderError> {
+        let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
+        let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
+
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<LogPlugin>()
+                .disable::<TerminalCtrlCHandlerPlugin>(),
+        )
+        .add_plugins(ObjPlugin)
+        .add_plugins(ImageCopyPlugin {
+            shared_rgba: shared_rgba.clone(),
+        })
+        .add_plugins(DepthReadbackPlugin {
+            shared_depth: shared_depth.clone(),
+            near: render_config.near_plane,
+            far: render_config.far_plane,
+        })
+        .insert_resource(SessionRenderConfig(render_config.clone()))
+        .insert_resource(shared_rgba.clone())
+        .init_resource::<RenderState>()
+        .add_systems(Startup, setup_session_persistent_scene)
+        .add_systems(
+            Update,
+            (
+                check_assets_loaded,
+                apply_materials,
+                tick_headless_batch_warmup,
+                request_headless_capture,
+                check_headless_capture_ready,
+                extract_and_continue_headless_batch,
+            )
+                .chain(),
+        );
+
+        app.finish();
+        app.cleanup();
+
+        // One warmup update runs Startup systems (render target, camera, lights)
+        // and creates the wgpu device. PSO compilation for specific mesh/material
+        // combinations still happens lazily on first real render.
+        app.update();
+
+        Ok(Self {
+            app,
+            render_config: render_config.clone(),
+            shared_rgba,
+            shared_depth,
+            _not_send_sync: std::marker::PhantomData,
+        })
+    }
+
+    /// Render a homogeneous batch of viewpoints (same object + rotation + config).
+    /// Returns outputs in request order.
+    ///
+    /// On `BatchRenderError::DeviceLost`, the returned error signals that the
+    /// wgpu device was lost mid-render. This call produced no output; any
+    /// outputs from earlier `render()` calls on this session are still valid.
+    /// Recovery: drop this `RenderSession` and construct a new one.
+    pub fn render(
+        &mut self,
+        requests: &[crate::BatchRenderRequest],
+    ) -> Result<Vec<crate::BatchRenderOutput>, crate::BatchRenderError> {
+        use crate::{BatchRenderError, BatchRenderOutput};
+
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Enforce homogeneity and config invariance.
+        let first = &requests[0];
+        if first.render_config != self.render_config {
+            return Err(BatchRenderError::InvalidConfig(format!(
+                "RenderSession render_config mismatch: session was constructed with a different \
+                 RenderConfig than the first request carries. Session config cannot change after \
+                 `new()`; construct a new session if you need a different resolution/camera."
+            )));
+        }
+        for r in &requests[1..] {
+            if r.object_dir != first.object_dir
+                || r.object_rotation != first.object_rotation
+                || r.render_config != first.render_config
+            {
+                return Err(BatchRenderError::InvalidConfig(
+                    "Phase 1 RenderSession::render requires homogeneous requests \
+                     (same object_dir, object_rotation, and render_config across the batch). \
+                     Call render() once per group instead."
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Canonicalize paths and validate mesh/texture presence. This matches
+        // `render_headless_sequence`'s preconditions so the error surface stays
+        // consistent.
+        let object_dir = std::fs::canonicalize(&first.object_dir).map_err(|e| {
+            BatchRenderError::InvalidConfig(format!(
+                "Cannot canonicalize object directory {}: {}",
+                first.object_dir.display(),
+                e
+            ))
+        })?;
+        let mesh_path = object_dir.join("google_16k/textured.obj");
+        let texture_path = object_dir.join("google_16k/texture_map.png");
+        if !mesh_path.exists() {
+            return Err(BatchRenderError::InvalidConfig(format!(
+                "Mesh not found: {}",
+                mesh_path.display()
+            )));
+        }
+        if !texture_path.exists() {
+            return Err(BatchRenderError::InvalidConfig(format!(
+                "Texture not found: {}",
+                texture_path.display()
+            )));
+        }
+
+        let viewpoints: Vec<Transform> = requests.iter().map(|r| r.viewpoint).collect();
+
+        // --- per-group scene swap (direct world manipulation) ---
+        {
+            let world = self.app.world_mut();
+
+            // Despawn any SessionScene entity from the previous group.
+            let stale: Vec<Entity> = world
+                .query_filtered::<Entity, With<SessionScene>>()
+                .iter(world)
+                .collect();
+            for entity in stale {
+                world.entity_mut(entity).despawn_recursive();
+            }
+
+            // Clear shared RGBA/depth buffers so a stale payload can't leak
+            // into the first viewpoint of this call.
+            if let Ok(mut guard) = self.shared_rgba.0.lock() {
+                *guard = None;
+            }
+            if let Ok(mut guard) = self.shared_depth.0.lock() {
+                *guard = None;
+            }
+
+            // Reset RenderState (scene_loaded, texture_loaded, capture_ready,
+            // frame_count, materials_applied, etc.). Default() gives all false/0.
+            *world.resource_mut::<RenderState>() = RenderState::default();
+
+            // Update RenderRequest so the existing capture systems see the new
+            // object paths, rotation, and camera transform (seeded from first vp).
+            let new_request = RenderRequest {
+                mesh_path: mesh_path.display().to_string(),
+                texture_path: texture_path.display().to_string(),
+                camera_transform: viewpoints[0],
+                object_rotation: first.object_rotation.clone(),
+                config: self.render_config.clone(),
+            };
+            world.insert_resource(new_request);
+
+            // Kick off asset loads and install the handles under the names the
+            // existing `check_assets_loaded` system expects.
+            let asset_server = world.resource::<AssetServer>().clone();
+            let scene_handle: Handle<Scene> = asset_server.load(&mesh_path.display().to_string());
+            let texture_handle: Handle<Image> =
+                asset_server.load(&texture_path.display().to_string());
+            world.insert_resource(LoadedScene(scene_handle.clone()));
+            world.insert_resource(LoadedTexture(texture_handle));
+
+            // Spawn the new scene entity tagged so we can find + despawn it next
+            // render() call.
+            world.spawn((
+                SceneRoot(scene_handle),
+                Transform::from_rotation(first.object_rotation.to_quat()),
+                RenderedObject,
+                SessionScene,
+            ));
+
+            // Seed the camera transform to the first viewpoint now so the first
+            // capture lines up; subsequent viewpoints are advanced by
+            // `extract_and_continue_headless_batch`.
+            let camera_entity = world
+                .query_filtered::<Entity, With<RenderCamera>>()
+                .iter(world)
+                .next();
+            if let Some(cam) = camera_entity {
+                if let Some(mut transform) = world.entity_mut(cam).get_mut::<Transform>() {
+                    *transform = viewpoints[0];
+                }
+            }
+
+            // Install the viewpoint sequence for this render() call.
+            world.insert_resource(HeadlessBatchSequence::new(viewpoints.clone()));
+        }
+
+        // --- drive the capture loop ---
+        let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                return Err(BatchRenderError::TotalFailure(format!(
+                    "RenderSession::render timed out after {}s",
+                    RENDER_TIMEOUT_SECS
+                )));
+            }
+
+            self.app.update();
+
+            if self.app.world().resource::<HeadlessBatchSequence>().done {
+                break;
+            }
+        }
+
+        // Collect outputs and zip with requests to produce BatchRenderOutput in
+        // request order.
+        let mut sequence = self
+            .app
+            .world_mut()
+            .resource_mut::<HeadlessBatchSequence>();
+        if sequence.outputs.len() != requests.len() {
+            return Err(BatchRenderError::TotalFailure(format!(
+                "RenderSession produced {} outputs for {} requests",
+                sequence.outputs.len(),
+                requests.len()
+            )));
+        }
+        let outputs = std::mem::take(&mut sequence.outputs);
+
+        Ok(requests
+            .iter()
+            .cloned()
+            .zip(outputs)
+            .map(|(req, out)| BatchRenderOutput::from_render_output(req, out))
+            .collect())
+    }
+}
+
 /// Render directly to files (for subprocess mode).
 ///
 /// This function saves RGBA and depth data directly to files before exiting.
