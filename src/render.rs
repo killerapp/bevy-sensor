@@ -2546,15 +2546,24 @@ impl RenderSession {
                 check_headless_capture_ready,
                 extract_and_continue_headless_batch,
             )
-                .chain(),
+                .chain()
+                // Gate the capture chain on `RenderRequest` existing. `new()`
+                // runs a warmup `app.update()` to execute Startup (which spawns
+                // the camera/lights/render target) before the first `render()`
+                // call, but does not yet insert `RenderRequest`. Several systems
+                // in this chain take `Res<RenderRequest>` (not `Option`) and
+                // would panic on SystemState init if the resource were absent.
+                .run_if(bevy::ecs::schedule::common_conditions::resource_exists::<RenderRequest>),
         );
 
         app.finish();
         app.cleanup();
 
         // One warmup update runs Startup systems (render target, camera, lights)
-        // and creates the wgpu device. PSO compilation for specific mesh/material
-        // combinations still happens lazily on first real render.
+        // so they exist before the first `render()` call seeds the camera
+        // transform. The Update chain is gated by `RenderRequest` existence and
+        // is a no-op this tick. PSO compilation for specific mesh/material
+        // combinations still happens lazily on the first real render.
         app.update();
 
         Ok(Self {
