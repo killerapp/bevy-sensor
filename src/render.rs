@@ -79,6 +79,23 @@ use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, R
 /// can take well over 60s on a cold GPU cache (see commit 9cd1d11).
 const RENDER_TIMEOUT_SECS: u64 = 180;
 
+/// Warmup frames after each camera move in `render_headless_sequence`.
+///
+/// After writing a new camera `Transform`, Bevy needs at least one frame for
+/// transform propagation + render-world extract before the next capture is
+/// valid. Historically set to 3 as a conservative cushion; reducing directly
+/// shortens per-viewpoint wall-clock since `app.update()` in the batch path
+/// is not rate-limited. Validated against the pixel-exact hardware test
+/// `test_batch_render_matches_sequential_episode_outputs`.
+const BATCH_WARMUP_FRAMES: u32 = 1;
+
+/// Check the render-trace env var. Cheap enough (single HashMap lookup) to call
+/// from per-frame systems; gate all tracing output behind this.
+#[inline]
+fn render_trace_enabled() -> bool {
+    std::env::var("BEVY_SENSOR_RENDER_TRACE").is_ok()
+}
+
 /// Check if a display is available for windowed rendering.
 ///
 /// Returns true if DISPLAY or WAYLAND_DISPLAY environment variable is set.
@@ -432,6 +449,9 @@ impl ViewNode for DepthReadbackNode {
         (view_depth_texture, camera): QueryItem<'w, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
+        let trace = render_trace_enabled();
+        let t0 = trace.then(std::time::Instant::now);
+
         // Check if depth capture is requested
         let Some(request) = world.get_resource::<DepthCaptureRequest>() else {
             return Ok(());
@@ -501,6 +521,13 @@ impl ViewNode for DepthReadbackNode {
                 near: request.near,
                 far: request.far,
             });
+        }
+
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][node] DepthReadbackNode ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         Ok(())
@@ -573,6 +600,9 @@ fn collect_depth_captures(
     shared_depth: Res<SharedDepthBuffer>,
     render_device: Res<RenderDevice>,
 ) {
+    let trace = render_trace_enabled();
+    let t_sys = trace.then(std::time::Instant::now);
+
     // Take all pending captures from the queue
     let pending_captures = {
         let Ok(mut pending) = queue.0.lock() else {
@@ -582,8 +612,16 @@ fn collect_depth_captures(
     };
 
     if pending_captures.is_empty() {
+        if let Some(t0) = t_sys {
+            eprintln!(
+                "[render_trace][sys] collect_depth_captures empty ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     }
+
+    let pending_count = pending_captures.len();
 
     // Process each pending capture synchronously with device polling
     for pending in pending_captures {
@@ -603,9 +641,13 @@ fn collect_depth_captures(
             let _ = tx.send(result);
         });
 
+        let t_wait = trace.then(std::time::Instant::now);
+        let mut poll_iters: u32 = 0;
+
         // Poll the device until mapping completes
         loop {
             render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            poll_iters += 1;
             match rx.try_recv() {
                 Ok(Ok(())) => {
                     let data = buffer_slice.get_mapped_range();
@@ -641,6 +683,22 @@ fn collect_depth_captures(
                 }
             }
         }
+
+        if let Some(t_wait) = t_wait {
+            eprintln!(
+                "[render_trace][sys] collect_depth_captures mapping_wait poll_iters={} ms={:.3}",
+                poll_iters,
+                t_wait.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    if let Some(t0) = t_sys {
+        eprintln!(
+            "[render_trace][sys] collect_depth_captures done pending={} ms={:.3}",
+            pending_count,
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -692,6 +750,9 @@ impl Node for ImageCopyDriver {
         _render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let trace = render_trace_enabled();
+        let t0 = trace.then(std::time::Instant::now);
+
         let Some(image_copiers) = world.get_resource::<ImageCopiers>() else {
             return Ok(());
         };
@@ -778,6 +839,13 @@ impl Node for ImageCopyDriver {
             }
         }
 
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][node] ImageCopyDriver ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
         Ok(())
     }
 }
@@ -793,6 +861,9 @@ fn collect_image_captures(
     shared_rgba: Res<SharedRgbaBuffer>,
     render_device: Res<RenderDevice>,
 ) {
+    let trace = render_trace_enabled();
+    let t_sys = trace.then(std::time::Instant::now);
+
     let pending_captures = {
         let Ok(mut pending) = queue.0.lock() else {
             return;
@@ -801,8 +872,16 @@ fn collect_image_captures(
     };
 
     if pending_captures.is_empty() {
+        if let Some(t0) = t_sys {
+            eprintln!(
+                "[render_trace][sys] collect_image_captures empty ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     }
+
+    let pending_count = pending_captures.len();
 
     for pending in pending_captures {
         let width = pending.width;
@@ -823,8 +902,10 @@ fn collect_image_captures(
         // Poll the device until mapping completes (with timeout)
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(10);
+        let mut poll_iters: u32 = 0;
         loop {
             render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            poll_iters += 1;
 
             if start.elapsed() > timeout {
                 eprintln!(
@@ -871,6 +952,22 @@ fn collect_image_captures(
                 }
             }
         }
+
+        if trace {
+            eprintln!(
+                "[render_trace][sys] collect_image_captures mapping_wait poll_iters={} ms={:.3}",
+                poll_iters,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    if let Some(t0) = t_sys {
+        eprintln!(
+            "[render_trace][sys] collect_image_captures done pending={} ms={:.3}",
+            pending_count,
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -1170,11 +1267,27 @@ pub fn render_headless_sequence(
     // Manual app.update() loops do not run plugin finish/cleanup hooks automatically.
     // Bevy's screenshot plugin inserts CapturedScreenshots during finish(), so run the
     // normal startup phases before driving the headless batch loop ourselves.
+    let trace_outer = render_trace_enabled();
+    let t_finish = std::time::Instant::now();
     app.finish();
+    let finish_ms = t_finish.elapsed().as_secs_f64() * 1000.0;
+    let t_cleanup = std::time::Instant::now();
     app.cleanup();
+    let cleanup_ms = t_cleanup.elapsed().as_secs_f64() * 1000.0;
+    if trace_outer {
+        eprintln!(
+            "[render_trace][coldinit] app.finish ms={:.3} app.cleanup ms={:.3}",
+            finish_ms, cleanup_ms
+        );
+    }
 
     let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
     let start = std::time::Instant::now();
+
+    let trace = std::env::var("BEVY_SENSOR_RENDER_TRACE").is_ok();
+    let mut update_idx: u32 = 0;
+    let mut last_completed_outputs: usize = 0;
+    let mut viewpoint_start = std::time::Instant::now();
 
     loop {
         if start.elapsed() > timeout {
@@ -1183,11 +1296,44 @@ pub fn render_headless_sequence(
             });
         }
 
+        let update_start = std::time::Instant::now();
         app.update();
+        let update_elapsed_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+
+        if trace {
+            let batch = app.world().resource::<HeadlessBatchSequence>();
+            let warmup = batch.warmup_frames_remaining;
+            let current = batch.current_index;
+            let completed = batch.outputs.len();
+            let vp_ms = viewpoint_start.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "[render_trace] update={update_idx} vp={current} warmup={warmup} \
+                 completed={completed} update_ms={update_elapsed_ms:.2} vp_ms={vp_ms:.2}"
+            );
+            if completed > last_completed_outputs {
+                eprintln!(
+                    "[render_trace] viewpoint {} finished in {:.2} ms",
+                    completed - 1,
+                    vp_ms
+                );
+                last_completed_outputs = completed;
+                viewpoint_start = std::time::Instant::now();
+            }
+        }
+
+        update_idx += 1;
 
         if app.world().resource::<HeadlessBatchSequence>().done {
             break;
         }
+    }
+
+    if trace {
+        eprintln!(
+            "[render_trace] total_wall_ms={:.2} updates={update_idx} viewpoints={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            viewpoints.len()
+        );
     }
 
     let mut batch = app.world_mut().resource_mut::<HeadlessBatchSequence>();
@@ -1484,6 +1630,10 @@ fn check_assets_loaded(
     scene: Option<Res<LoadedScene>>,
     texture: Option<Res<LoadedTexture>>,
 ) {
+    let trace = render_trace_enabled();
+    let was_scene_loaded = state.scene_loaded;
+    let was_texture_loaded = state.texture_loaded;
+
     state.frame_count += 1;
 
     if state.scene_loaded && state.texture_loaded {
@@ -1507,6 +1657,21 @@ fn check_assets_loaded(
             }
             Some(LoadState::Failed(_)) => {}
             _ => {}
+        }
+    }
+
+    if trace {
+        if !was_scene_loaded && state.scene_loaded {
+            eprintln!(
+                "[render_trace][coldinit] scene_loaded frame_count={}",
+                state.frame_count
+            );
+        }
+        if !was_texture_loaded && state.texture_loaded {
+            eprintln!(
+                "[render_trace][coldinit] texture_loaded frame_count={}",
+                state.frame_count
+            );
         }
     }
 }
@@ -1550,7 +1715,14 @@ fn apply_materials(
     // Wait more frames after applying materials
     // Software rendering (llvmpipe) needs more frames to fully render
     if state.frame_count >= 60 {
+        let was_ready = state.capture_ready;
         state.capture_ready = true;
+        if render_trace_enabled() && !was_ready {
+            eprintln!(
+                "[render_trace][coldinit] capture_ready frame_count={}",
+                state.frame_count
+            );
+        }
     }
 }
 
@@ -1732,6 +1904,9 @@ fn setup_headless_scene(
     request: Res<RenderRequest>,
     mut _materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let trace = render_trace_enabled();
+    let t0 = trace.then(std::time::Instant::now);
+
     #[cfg(test)]
     HEADLESS_SCENE_SETUP_COUNT.fetch_add(1, Ordering::SeqCst);
 
@@ -1850,6 +2025,13 @@ fn setup_headless_scene(
         Transform::from_rotation(request.object_rotation.to_quat()),
         RenderedObject,
     ));
+
+    if let Some(t0) = t0 {
+        eprintln!(
+            "[render_trace][startup] setup_headless_scene ms={:.3}",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Request capture for headless rendering (enable ImageCopier)
@@ -1859,7 +2041,16 @@ fn request_headless_capture(
     mut query: Query<&mut ImageCopier>,
     batch: Option<Res<HeadlessBatchSequence>>,
 ) {
+    let trace = render_trace_enabled();
+    let t0 = trace.then(std::time::Instant::now);
+
     if !state.capture_ready || state.screenshot_requested {
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] request_headless_capture skipped(gate) ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     }
 
@@ -1867,6 +2058,12 @@ fn request_headless_capture(
         .as_ref()
         .is_some_and(|batch| batch.warmup_frames_remaining > 0)
     {
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] request_headless_capture skipped(warmup) ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     }
 
@@ -1879,6 +2076,13 @@ fn request_headless_capture(
     depth_request.requested = true;
 
     state.screenshot_requested = true;
+
+    if let Some(t0) = t0 {
+        eprintln!(
+            "[render_trace][sys] request_headless_capture requested ms={:.3}",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Check if headless capture has completed
@@ -1889,7 +2093,16 @@ fn check_headless_capture_ready(
     request: Res<RenderRequest>,
     mut query: Query<&mut ImageCopier>,
 ) {
+    let trace = render_trace_enabled();
+    let t0 = trace.then(std::time::Instant::now);
+
     if !state.screenshot_requested || state.captured {
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] check_headless_capture_ready skipped(gate) ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     }
 
@@ -1938,6 +2151,17 @@ fn check_headless_capture_ready(
 
     if state.rgba_data.is_some() && state.depth_data.is_some() {
         state.captured = true;
+    }
+
+    if let Some(t0) = t0 {
+        eprintln!(
+            "[render_trace][sys] check_headless_capture_ready rgba_ready={} depth_ready={} captured={} frame_count={} ms={:.3}",
+            rgba_ready,
+            depth_ready,
+            state.captured,
+            state.frame_count,
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -2019,12 +2243,29 @@ fn extract_and_continue_headless_batch(
     mut depth_request: ResMut<DepthCaptureRequest>,
     mut image_copiers: Query<&mut ImageCopier>,
 ) {
+    let trace = render_trace_enabled();
+    let t0 = trace.then(std::time::Instant::now);
+
     let (shared_rgba, shared_depth) = buffers;
     let Some(mut batch) = batch else {
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] extract_and_continue_headless_batch skipped(no_batch) ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     };
 
     if state.exit_requested || !state.captured || batch.done {
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] extract_and_continue_headless_batch skipped(gate) captured={} done={} ms={:.3}",
+                state.captured,
+                batch.done,
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return;
     }
 
@@ -2063,7 +2304,7 @@ fn extract_and_continue_headless_batch(
         }
 
         batch.current_index = next_index;
-        batch.warmup_frames_remaining = 3;
+        batch.warmup_frames_remaining = BATCH_WARMUP_FRAMES;
 
         if let Some(next_viewpoint) = batch.current_viewpoint() {
             for mut camera_transform in camera_query.iter_mut() {
@@ -2091,6 +2332,21 @@ fn extract_and_continue_headless_batch(
         state.depth_data = None;
         state.image_width = 0;
         state.image_height = 0;
+
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] extract_and_continue_headless_batch extracted vp={} next={} done={} ms={:.3}",
+                batch.current_index.saturating_sub(1),
+                batch.current_index,
+                batch.done,
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    } else if let Some(t0) = t0 {
+        eprintln!(
+            "[render_trace][sys] extract_and_continue_headless_batch no_data ms={:.3}",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
