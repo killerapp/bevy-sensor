@@ -72,6 +72,13 @@ use std::time::Duration;
 
 use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput};
 
+/// Watchdog timeout for a single render, in seconds.
+///
+/// Bounds how long any single render path waits before declaring failure.
+/// 180s accommodates first-run wgpu shader compilation on Windows, which
+/// can take well over 60s on a cold GPU cache (see commit 9cd1d11).
+const RENDER_TIMEOUT_SECS: u64 = 180;
+
 /// Check if a display is available for windowed rendering.
 ///
 /// Returns true if DISPLAY or WAYLAND_DISPLAY environment variable is set.
@@ -1023,7 +1030,7 @@ pub fn render_headless(
     // Spawn watchdog thread that monitors for timeout (don't exit - let Bevy exit gracefully)
     let output_poll_for_timeout = shared_output.clone();
     std::thread::spawn(move || {
-        let timeout = std::time::Duration::from_secs(180);
+        let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(100);
 
@@ -1037,7 +1044,10 @@ pub fn render_headless(
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Error: Render timeout after 180 seconds");
+                eprintln!(
+                    "Error: Render timeout after {} seconds",
+                    RENDER_TIMEOUT_SECS
+                );
                 eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
                 // Force exit on timeout (this is a failure case)
                 std::process::exit(1);
@@ -1163,12 +1173,14 @@ pub fn render_headless_sequence(
     app.finish();
     app.cleanup();
 
-    let timeout = std::time::Duration::from_secs(180);
+    let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
     let start = std::time::Instant::now();
 
     loop {
         if start.elapsed() > timeout {
-            return Err(RenderError::RenderTimeout { duration_secs: 180 });
+            return Err(RenderError::RenderTimeout {
+                duration_secs: RENDER_TIMEOUT_SECS,
+            });
         }
 
         app.update();
@@ -2130,7 +2142,7 @@ pub fn render_to_files(
 
     // Spawn watchdog thread that saves files and exits
     std::thread::spawn(move || {
-        let timeout = std::time::Duration::from_secs(180);
+        let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(100);
 
@@ -2156,7 +2168,10 @@ pub fn render_to_files(
             }
 
             if start.elapsed() > timeout {
-                eprintln!("Error: Render timeout after 180 seconds");
+                eprintln!(
+                    "Error: Render timeout after {} seconds",
+                    RENDER_TIMEOUT_SECS
+                );
                 eprintln!("Debug info: This may indicate GPU issues, missing assets, or insufficient system resources.");
                 std::process::exit(1);
             }
