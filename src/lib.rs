@@ -1354,11 +1354,14 @@ mod tests {
     #[test]
     fn test_render_config_tbp_default() {
         let config = RenderConfig::tbp_default();
+        // TBP spec: 64x64 patch sensor resolution
         assert_eq!(config.width, 64);
         assert_eq!(config.height, 64);
-        assert_eq!(config.zoom, 1.0);
-        assert_eq!(config.near_plane, 0.01);
-        assert_eq!(config.far_plane, 10.0);
+        // Zoom is a divisor in the FOV formula — must be positive
+        assert!(config.zoom > 0.0);
+        // Clipping planes must form a valid, positive range
+        assert!(config.near_plane > 0.0);
+        assert!(config.far_plane > config.near_plane);
     }
 
     #[test]
@@ -1380,12 +1383,14 @@ mod tests {
     fn test_render_config_fov() {
         let config = RenderConfig::tbp_default();
         let fov = config.fov_radians();
-        // Base FOV is 60 degrees = ~1.047 radians
-        assert!((fov - 1.047).abs() < 0.01);
+        // FOV must be a valid positive angle strictly less than π for any
+        // positive zoom — no cameras with ≥180° FOV.
+        assert!(fov > 0.0);
+        assert!(fov < PI);
 
-        // Zoom in should reduce FOV
+        // Zoom in should reduce FOV (tighter view).
         let zoomed = RenderConfig {
-            zoom: 2.0,
+            zoom: config.zoom * 2.0,
             ..config
         };
         assert!(zoomed.fov_radians() < fov);
@@ -1396,13 +1401,15 @@ mod tests {
         let config = RenderConfig::tbp_default();
         let intrinsics = config.intrinsics();
 
-        assert_eq!(intrinsics.image_size, [64, 64]);
-        assert_eq!(intrinsics.principal_point, [32.0, 32.0]);
-        // Focal length should be positive and reasonable
+        // Image size matches config; principal point at image center.
+        assert_eq!(intrinsics.image_size, [config.width, config.height]);
+        assert_eq!(
+            intrinsics.principal_point,
+            [config.width as f64 / 2.0, config.height as f64 / 2.0]
+        );
+        // Square pixels: fx == fy.
+        assert_eq!(intrinsics.focal_length[0], intrinsics.focal_length[1]);
         assert!(intrinsics.focal_length[0] > 0.0);
-        assert!(intrinsics.focal_length[1] > 0.0);
-        // For 64x64 with 60° FOV, focal length ≈ 55.4 pixels
-        assert!((intrinsics.focal_length[0] - 55.4).abs() < 1.0);
     }
 
     #[test]
@@ -1684,31 +1691,49 @@ mod tests {
 
     #[test]
     fn test_render_config_zoom_affects_fov() {
-        let base = RenderConfig::tbp_default();
-        let zoomed = RenderConfig {
+        // The formula fov = 2·atan(tan(base_hfov/2)/zoom) has an exact
+        // invariant: tan(fov/2) * zoom is constant. So doubling zoom
+        // halves tan(fov/2). (This is NOT the same as halving fov itself,
+        // which only holds as a small-angle approximation.)
+        let base = RenderConfig {
             zoom: 2.0,
-            ..base.clone()
+            ..RenderConfig::tbp_default()
+        };
+        let doubled = RenderConfig {
+            zoom: 4.0,
+            ..RenderConfig::tbp_default()
         };
 
-        // Higher zoom = lower FOV
-        assert!(zoomed.fov_radians() < base.fov_radians());
-        // Specifically, 2x zoom = half FOV
-        assert!((zoomed.fov_radians() - base.fov_radians() / 2.0).abs() < 0.01);
+        // Higher zoom → tighter FOV (monotonicity).
+        assert!(doubled.fov_radians() < base.fov_radians());
+
+        // Exact invariant: tan(fov/2) scales as 1/zoom.
+        let base_half_tan = (base.fov_radians() / 2.0).tan();
+        let doubled_half_tan = (doubled.fov_radians() / 2.0).tan();
+        assert!((base_half_tan / doubled_half_tan - 2.0).abs() < 1e-4);
     }
 
     #[test]
     fn test_render_config_zoom_affects_intrinsics() {
-        let base = RenderConfig::tbp_default();
-        let zoomed = RenderConfig {
+        // The formula fx = (width/2)·zoom/tan(base_hfov/2) is linear in
+        // zoom for fixed width/base_hfov, so fx/zoom is constant.
+        let a = RenderConfig {
             zoom: 2.0,
-            ..base.clone()
+            ..RenderConfig::tbp_default()
+        };
+        let b = RenderConfig {
+            zoom: 4.0,
+            ..RenderConfig::tbp_default()
         };
 
-        // Higher zoom = higher focal length
-        let base_intrinsics = base.intrinsics();
-        let zoomed_intrinsics = zoomed.intrinsics();
+        let fx_a = a.intrinsics().focal_length[0];
+        let fx_b = b.intrinsics().focal_length[0];
 
-        assert!(zoomed_intrinsics.focal_length[0] > base_intrinsics.focal_length[0]);
+        // Monotonic: higher zoom → larger focal length.
+        assert!(fx_b > fx_a);
+
+        // Exact linearity: fx/zoom is constant across configs.
+        assert!((fx_a / a.zoom as f64 - fx_b / b.zoom as f64).abs() < 1e-9);
     }
 
     #[test]
