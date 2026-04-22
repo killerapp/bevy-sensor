@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/killerapp/bevy-sensor/compare/v0.4.10...v0.5.0) - 2026-04-21
+
+### Added
+
+- *(render)* RenderSession — persistent App for 8.85× parity-gate speedup ([#59](https://github.com/killerapp/bevy-sensor/pull/59))
+
+### Fixed
+
+- *(render)* drop legacy 60-frame scene-warmup gate in apply_materials ([#56](https://github.com/killerapp/bevy-sensor/pull/56))
+
+### Other
+
+- *(render)* reduce batch warmup 3→1 + add BEVY_SENSOR_RENDER_TRACE diagnostics ([#57](https://github.com/killerapp/bevy-sensor/pull/57))
+
 ## [0.4.10](https://github.com/killerapp/bevy-sensor/compare/v0.4.9...v0.4.10) - 2026-04-21
 
 ### Fixed
