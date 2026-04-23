@@ -13,6 +13,7 @@
 //!   cargo run --bin prerender -- --single-render --object <name> --rotation <idx> --viewpoint <idx> --output <dir>
 
 use bevy_sensor::ycb;
+use bevy_sensor::ycbust;
 use bevy_sensor::{generate_viewpoints, ObjectRotation, RenderConfig, ViewpointConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -120,8 +121,11 @@ fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("\nYCB models not found at {:?}", ycb_dir);
         println!("Downloading representative models...");
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        if let Err(e) = rt.block_on(ycb::download_models(&ycb_dir, ycb::Subset::Representative)) {
+        if let Err(e) = ycbust::blocking::download_ycb_blocking(
+            ycb::Subset::Representative,
+            &ycb_dir,
+            ycbust::DownloadOptions::default(),
+        ) {
             eprintln!("Failed to download models: {}", e);
             std::process::exit(1);
         }
@@ -201,8 +205,11 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         println!("\nYCB models not found at {:?}", ycb_dir);
         println!("Downloading representative models...");
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        if let Err(e) = rt.block_on(ycb::download_models(&ycb_dir, ycb::Subset::Representative)) {
+        if let Err(e) = ycbust::blocking::download_ycb_blocking(
+            ycb::Subset::Representative,
+            &ycb_dir,
+            ycbust::DownloadOptions::default(),
+        ) {
             eprintln!("Failed to download models: {}", e);
             std::process::exit(1);
         }
