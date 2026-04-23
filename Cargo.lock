@@ -6421,9 +6421,9 @@ checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
 
 [[package]]
 name = "ycbust"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2a629db7c12d4ac5f5347bf91b6bb6bf13e73232563aeb633c2388d33f63844"
+checksum = "629ad24455b124695651ba7f5d67e08fc0513adc294cfdd4f644cd791bfba53d"
 dependencies = [
  "anyhow",
  "async-compression",
