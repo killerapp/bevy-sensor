@@ -71,21 +71,18 @@ pub mod cache;
 pub mod fixtures;
 
 // Re-export ycbust types for convenience
-#[allow(deprecated)]
 pub use ycbust::{
-    self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
-    TEN_OBJECTS,
+    self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TBP_SIMILAR_OBJECTS,
+    TBP_STANDARD_OBJECTS,
 };
 
 /// YCB dataset utilities
 pub mod ycb {
-    #[allow(deprecated)]
     pub use ycbust::{
-        download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
-        TEN_OBJECTS,
+        download_ycb, DownloadOptions, Subset, REPRESENTATIVE_OBJECTS, TBP_SIMILAR_OBJECTS,
+        TBP_STANDARD_OBJECTS,
     };
 
-    use reqwest::Client;
     use std::path::Path;
 
     /// Download YCB models to the specified directory.
@@ -104,13 +101,7 @@ pub mod ycb {
         output_dir: P,
         subset: Subset,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let options = DownloadOptions {
-            overwrite: false,
-            full: false,
-            show_progress: true,
-            delete_archives: true,
-        };
-        download_ycb(subset, output_dir.as_ref(), options).await?;
+        download_ycb(subset, output_dir.as_ref(), DownloadOptions::default()).await?;
         Ok(())
     }
 
@@ -125,51 +116,27 @@ pub mod ycb {
     }
 
     /// Download specific YCB objects by object ID using the standard `google_16k` meshes.
+    ///
+    /// Thin wrapper over [`ycbust::download_objects`] (added upstream in v0.3.3):
+    /// preserves this crate's ergonomic `P: AsRef<Path>` surface while delegating
+    /// skip / resume / integrity / parallelism to the upstream implementation.
     pub async fn download_objects<P: AsRef<Path>>(
         output_dir: P,
         object_ids: &[&str],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let output_dir = output_dir.as_ref();
-        let client = Client::new();
-        let options = DownloadOptions {
-            overwrite: false,
-            full: false,
-            show_progress: true,
-            delete_archives: true,
-        };
-
-        std::fs::create_dir_all(output_dir)?;
-
-        for object_id in object_ids {
-            let url = ycbust::get_tgz_url(object_id, "google_16k");
-            let archive_path = output_dir.join(format!("{object_id}_google_16k.tgz"));
-
-            if archive_path.exists() && !options.overwrite {
-                continue;
-            }
-
-            ycbust::download_file(&client, &url, &archive_path, options.show_progress).await?;
-            ycbust::extract_tgz(&archive_path, output_dir, options.delete_archives)?;
-        }
-
+        ycbust::download_objects(object_ids, output_dir.as_ref(), DownloadOptions::default())
+            .await?;
         Ok(())
     }
 
     /// Check if YCB models exist at the given path
     pub fn models_exist<P: AsRef<Path>>(output_dir: P) -> bool {
-        let path = output_dir.as_ref();
-        // Check for at least one representative object
-        path.join("003_cracker_box/google_16k/textured.obj")
-            .exists()
+        ycbust::object_mesh_path(output_dir.as_ref(), "003_cracker_box").exists()
     }
 
     /// Get the path to a specific YCB object's OBJ file
     pub fn object_mesh_path<P: AsRef<Path>>(output_dir: P, object_id: &str) -> std::path::PathBuf {
-        output_dir
-            .as_ref()
-            .join(object_id)
-            .join("google_16k")
-            .join("textured.obj")
+        ycbust::object_mesh_path(output_dir.as_ref(), object_id)
     }
 
     /// Get the path to a specific YCB object's texture file
@@ -177,11 +144,7 @@ pub mod ycb {
         output_dir: P,
         object_id: &str,
     ) -> std::path::PathBuf {
-        output_dir
-            .as_ref()
-            .join(object_id)
-            .join("google_16k")
-            .join("texture_map.png")
+        ycbust::object_texture_path(output_dir.as_ref(), object_id)
     }
 }
 
@@ -1321,10 +1284,15 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_ycb_ten_objects() {
-        // Verify ten objects subset is defined
-        assert_eq!(crate::ycb::TEN_OBJECTS.len(), 10);
+    fn test_ycb_tbp_standard_objects() {
+        assert_eq!(crate::ycb::TBP_STANDARD_OBJECTS.len(), 10);
+        assert!(crate::ycb::TBP_STANDARD_OBJECTS.contains(&"025_mug"));
+    }
+
+    #[test]
+    fn test_ycb_tbp_similar_objects() {
+        assert_eq!(crate::ycb::TBP_SIMILAR_OBJECTS.len(), 10);
+        assert!(crate::ycb::TBP_SIMILAR_OBJECTS.contains(&"003_cracker_box"));
     }
 
     #[test]
