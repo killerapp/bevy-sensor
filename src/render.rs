@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput};
+use ycbust::{GOOGLE_16K_MESH_RELATIVE, GOOGLE_16K_TEXTURE_RELATIVE};
 
 /// Watchdog timeout for a single render, in seconds.
 ///
@@ -1095,8 +1096,8 @@ pub fn render_headless(
             e
         ))
     })?;
-    let mesh_path = object_dir.join("google_16k/textured.obj");
-    let texture_path = object_dir.join("google_16k/texture_map.png");
+    let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
+    let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
         return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
@@ -1203,8 +1204,8 @@ pub fn render_headless_sequence(
             e
         ))
     })?;
-    let mesh_path = object_dir.join("google_16k/textured.obj");
-    let texture_path = object_dir.join("google_16k/texture_map.png");
+    let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
+    let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
         return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
@@ -2626,8 +2627,8 @@ impl RenderSession {
                 e
             ))
         })?;
-        let mesh_path = object_dir.join("google_16k/textured.obj");
-        let texture_path = object_dir.join("google_16k/texture_map.png");
+        let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
+        let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
         if !mesh_path.exists() {
             return Err(BatchRenderError::InvalidConfig(format!(
                 "Mesh not found: {}",
@@ -2766,8 +2767,8 @@ pub fn render_to_files(
     rgba_path: &Path,
     depth_path: &Path,
 ) -> Result<(), RenderError> {
-    let mesh_path = object_dir.join("google_16k/textured.obj");
-    let texture_path = object_dir.join("google_16k/texture_map.png");
+    let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
+    let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
         return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));

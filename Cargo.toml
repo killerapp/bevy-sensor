@@ -29,17 +29,26 @@ bevy = { version = "0.15.3", default-features = false, features = [
     "zstd",            # Compression for ktx2
 ] }
 bevy_obj = { version = "0.15", features = ["scene"] }
-ycbust = "0.3"
+ycbust = { version = "0.4.0", features = ["blocking"] }
 image = "0.25"  # For saving PNG/depth images
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 reqwest = "0.11"
 
+[features]
+default = []
+# Enable ycbust's S3 streaming support for integration tests that exercise
+# the upstream `ycbust::s3` surface. Not used by runtime code.
+ycbust-s3 = ["ycbust/s3"]
+
 [dev-dependencies]
 tempfile = "3.10"
 pollster = "0.4.0"
 wgpu = "24.0"
+# For `ycbust_contract_error_from_and_into_anyhow` — verifies the bidirectional
+# `YcbError` ↔ `anyhow::Error` conversion upstream guarantees.
+anyhow = "1.0"
 
 [[bin]]
 name = "prerender"
