@@ -67,7 +67,10 @@ fn ycbust_s3_contract_destination_with_region_is_chainable() {
 #[test]
 fn ycbust_s3_contract_destination_full_path_joins_prefix() {
     let dest = S3Destination::from_url("s3://b/ycb/").unwrap();
-    assert_eq!(dest.full_path("003_cracker_box.tgz"), "ycb/003_cracker_box.tgz");
+    assert_eq!(
+        dest.full_path("003_cracker_box.tgz"),
+        "ycb/003_cracker_box.tgz"
+    );
 }
 
 #[test]
@@ -91,9 +94,14 @@ async fn ycbust_s3_live_download_representative_to_bucket() {
     let dest =
         S3Destination::from_url(&format!("s3://{}/bevy-sensor-ycbust-live/", bucket)).unwrap();
 
-    download_ycb_to_s3(Subset::Representative, dest, DownloadOptions::default(), None)
-        .await
-        .expect("live S3 upload of representative subset");
+    download_ycb_to_s3(
+        Subset::Representative,
+        dest,
+        DownloadOptions::default(),
+        None,
+    )
+    .await
+    .expect("live S3 upload of representative subset");
 }
 
 #[tokio::test]

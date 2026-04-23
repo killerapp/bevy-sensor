@@ -47,12 +47,8 @@ fn ycbust_network_smoke_blocking_download_representative() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let start = Instant::now();
-    download_ycb_blocking(
-        Subset::Representative,
-        dir.path(),
-        silent_options(1),
-    )
-    .expect("initial download failed");
+    download_ycb_blocking(Subset::Representative, dir.path(), silent_options(1))
+        .expect("initial download failed");
     let first = start.elapsed();
 
     assert_subset_present(dir.path(), REPRESENTATIVE_OBJECTS);
@@ -61,12 +57,8 @@ fn ycbust_network_smoke_blocking_download_representative() {
     // Second call should short-circuit on extracted-mesh detection — no
     // re-download. This validates the resume path we rely on.
     let start = Instant::now();
-    download_ycb_blocking(
-        Subset::Representative,
-        dir.path(),
-        silent_options(1),
-    )
-    .expect("warm download failed");
+    download_ycb_blocking(Subset::Representative, dir.path(), silent_options(1))
+        .expect("warm download failed");
     let warm = start.elapsed();
     println!("representative warm resume (concurrency=1): {warm:?}");
 
@@ -88,22 +80,14 @@ fn ycbust_network_smoke_parallel_beats_serial_tbp_standard() {
     let parallel_dir = tempfile::tempdir().expect("tempdir parallel");
 
     let start = Instant::now();
-    download_ycb_blocking(
-        Subset::TbpStandard,
-        serial_dir.path(),
-        silent_options(1),
-    )
-    .expect("serial download failed");
+    download_ycb_blocking(Subset::TbpStandard, serial_dir.path(), silent_options(1))
+        .expect("serial download failed");
     let serial = start.elapsed();
     assert_subset_present(serial_dir.path(), TBP_STANDARD_OBJECTS);
 
     let start = Instant::now();
-    download_ycb_blocking(
-        Subset::TbpStandard,
-        parallel_dir.path(),
-        silent_options(4),
-    )
-    .expect("parallel download failed");
+    download_ycb_blocking(Subset::TbpStandard, parallel_dir.path(), silent_options(4))
+        .expect("parallel download failed");
     let parallel = start.elapsed();
     assert_subset_present(parallel_dir.path(), TBP_STANDARD_OBJECTS);
 

@@ -228,11 +228,7 @@ fn ycbust_contract_extract_tgz_is_callable() {
     // Call on a path we know doesn't exist; we only care that it returns an
     // error rather than failing to compile.
     let dir = tempfile::tempdir().expect("tempdir");
-    let err = ycbust::extract_tgz(
-        &dir.path().join("does_not_exist.tgz"),
-        dir.path(),
-        false,
-    );
+    let err = ycbust::extract_tgz(&dir.path().join("does_not_exist.tgz"), dir.path(), false);
     assert!(err.is_err());
 }
 
@@ -356,10 +352,7 @@ fn ycbust_contract_blocking_download_objects_empty_slice_is_noop() {
     // Empty slice should no-op without hitting the network. Also exercises
     // the runtime-construction path in the blocking wrapper.
     let dir = tempfile::tempdir().expect("tempdir");
-    let result = ycbust::blocking::download_objects_blocking(
-        &[],
-        dir.path(),
-        DownloadOptions::default(),
-    );
+    let result =
+        ycbust::blocking::download_objects_blocking(&[], dir.path(), DownloadOptions::default());
     assert!(result.is_ok());
 }
