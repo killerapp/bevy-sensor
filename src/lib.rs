@@ -811,9 +811,11 @@ pub fn render_all_viewpoints(
 /// Render with model caching support for efficient multi-viewpoint rendering.
 ///
 /// This function tracks which models have been loaded and provides performance
-/// insights. The current batch API is a queue-oriented wrapper, not a persistent
-/// renderer, so this function and `render_to_buffer()` use the same underlying
-/// headless app-per-render path today.
+/// insights. It still spins up a fresh headless `App` per call. For workloads
+/// that render many frames against the same object/config, prefer
+/// `RenderSession` (homogeneous batches per episode) or `PersistentRenderer`
+/// (one frame per call, scene held loaded across calls — built for surface-
+/// policy feedback loops).
 ///
 /// # Arguments
 /// * `object_dir` - Path to YCB object directory
@@ -936,6 +938,13 @@ pub use batch::{
 /// Persistent batch render session. See the module docs in `render::RenderSession`
 /// for lifetime, thread-affinity, and config-invariance guarantees.
 pub use render::RenderSession;
+
+/// Per-step persistent renderer for feedback loops. See the module docs in
+/// `render::PersistentRenderer` for lifetime, thread-affinity, and
+/// object/config-invariance guarantees. Built for the surface-policy use case
+/// in neocortx where a fixed object is rendered from a moving camera many
+/// times per episode (issue #65).
+pub use render::PersistentRenderer;
 
 /// Create a new batch renderer helper for multi-viewpoint workflows.
 ///
