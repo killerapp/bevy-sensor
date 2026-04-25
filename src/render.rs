@@ -64,7 +64,7 @@ use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_obj::ObjPlugin;
 use std::fs::File;
 use std::io::Read as IoRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -89,6 +89,30 @@ const RENDER_TIMEOUT_SECS: u64 = 180;
 /// is not rate-limited. Validated against the pixel-exact hardware test
 /// `test_batch_render_matches_sequential_episode_outputs`.
 const BATCH_WARMUP_FRAMES: u32 = 1;
+
+/// Warmup frames at the start of each `PersistentRenderer::render()` call.
+///
+/// `BATCH_WARMUP_FRAMES = 1` works for inter-viewpoint advancement inside a
+/// batch because `extract_and_continue_headless_batch` writes the next
+/// camera transform *and* clears the shared GPU readback buffers in the
+/// same tick — so the in-flight copy from the previous viewpoint has
+/// already drained by the time the next capture is gated.
+///
+/// In the persistent per-call path, the previous render's output may still
+/// be sitting in `shared_rgba`/`shared_depth` (we clear them before the
+/// loop, but the pipeline still needs ticks to propagate the new camera/
+/// scene-rotation `Transform` writes through `PostUpdate` →
+/// `transform_propagate` → `Extract` → render graph → `ImageCopyDriver`
+/// before the capture we request actually reflects the new transforms.
+///
+/// Validated by `test_persistent_renderer_matches_render_to_buffer`. Three
+/// ticks of warmup gives Windows/DX12 enough room to drain the previous
+/// readback and capture the post-propagation color target:
+///   - tick 0: transforms propagate, render runs (no copy enabled)
+///   - tick 1: previous in-flight readback drains (no copy enabled)
+///   - tick 2: warmup hits 0, capture fires, render runs with copy enabled
+///   - tick 3: shared buffers populated → captured → batch finalized
+const PERSISTENT_WARMUP_FRAMES: u32 = 3;
 
 /// Check the render-trace env var. Cheap enough (single HashMap lookup) to call
 /// from per-frame systems; gate all tracing output behind this.
@@ -2752,6 +2776,324 @@ impl RenderSession {
             .zip(outputs)
             .map(|(req, out)| BatchRenderOutput::from_render_output(req, out))
             .collect())
+    }
+}
+
+// ============================================================================
+// Per-step persistent renderer (PersistentRenderer)
+//
+// `RenderSession` reuses the App across calls but rebuilds the scene on every
+// `render()` (despawn SceneRoot, re-issue asset_server.load, respawn). That's
+// fine for the parity-gate path (one scene per episode of N viewpoints) but
+// wasteful for surface-policy feedback loops where N=1 viewpoint per call and
+// the object stays loaded for the whole episode.
+//
+// `PersistentRenderer` commits to one `object_dir` + `RenderConfig` at
+// construction. `new()` loads mesh + texture + spawns the scene root + drives
+// one warmup render (output discarded) so PSO compilation and material setup
+// are paid up front. `render(camera, rotation)` then only mutates the camera
+// `Transform` and (if changed) the scene root rotation, drives the capture
+// chain for one frame, and returns. See issue #65.
+// ============================================================================
+
+/// Marker for the `PersistentRenderer`'s scene root entity. We keep the
+/// entity alive for the whole renderer lifetime and just mutate its
+/// `Transform` when the caller-supplied object rotation changes.
+#[derive(Component)]
+struct PersistentScene;
+
+/// Persistent per-step renderer. Loads the scene once at `new()` and renders
+/// one frame per `render()` call by mutating the camera transform and scene
+/// root rotation in-place. Built for surface-policy feedback loops where the
+/// object stays fixed for the duration of an episode and the camera moves
+/// every step. See issue #65.
+///
+/// # Thread affinity
+///
+/// `PersistentRenderer` must be created, used, and dropped on the same thread.
+/// Holds a `bevy::App` that owns GPU resources not safe to move across
+/// threads; `!Send + !Sync` is enforced via `PhantomData<*const ()>`.
+///
+/// # Object + config invariants
+///
+/// `object_dir` and `RenderConfig` are fixed at `new()`. To render a different
+/// object or change resolution/lighting, drop and rebuild. Rotation may change
+/// freely between `render()` calls.
+pub struct PersistentRenderer {
+    app: App,
+    object_dir: PathBuf,
+    render_config: RenderConfig,
+    shared_rgba: SharedRgbaBuffer,
+    shared_depth: SharedDepthBuffer,
+    _not_send_sync: std::marker::PhantomData<*const ()>,
+}
+
+impl PersistentRenderer {
+    /// Build the App, load the scene + texture, spawn the scene root, and drive
+    /// one warmup render whose output is discarded. After `new()` returns, the
+    /// first user-facing `render()` call benefits from a warm PSO cache and
+    /// applied materials.
+    pub fn new(
+        object_dir: &Path,
+        render_config: &RenderConfig,
+    ) -> Result<Self, crate::RenderError> {
+        let object_dir =
+            std::fs::canonicalize(object_dir).map_err(|e| crate::RenderError::FileNotFound {
+                path: object_dir.display().to_string(),
+                reason: e.to_string(),
+            })?;
+        let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
+        let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
+        if !mesh_path.exists() {
+            return Err(crate::RenderError::MeshNotFound(
+                mesh_path.display().to_string(),
+            ));
+        }
+        if !texture_path.exists() {
+            return Err(crate::RenderError::TextureNotFound(
+                texture_path.display().to_string(),
+            ));
+        }
+
+        let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
+        let shared_depth: SharedDepthBuffer = SharedDepthBuffer::default();
+
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<LogPlugin>()
+                .disable::<TerminalCtrlCHandlerPlugin>(),
+        )
+        .add_plugins(ObjPlugin)
+        .add_plugins(ImageCopyPlugin {
+            shared_rgba: shared_rgba.clone(),
+        })
+        .add_plugins(DepthReadbackPlugin {
+            shared_depth: shared_depth.clone(),
+            near: render_config.near_plane,
+            far: render_config.far_plane,
+        })
+        .insert_resource(SessionRenderConfig(render_config.clone()))
+        .insert_resource(shared_rgba.clone())
+        .init_resource::<RenderState>()
+        .add_systems(Startup, setup_session_persistent_scene)
+        .add_systems(
+            Update,
+            (
+                check_assets_loaded,
+                apply_materials,
+                tick_headless_batch_warmup,
+                request_headless_capture,
+                check_headless_capture_ready,
+                extract_and_continue_headless_batch,
+            )
+                .chain()
+                // Same gate as RenderSession: capture chain only runs once
+                // RenderRequest is installed. Startup runs first via the
+                // warmup `app.update()` below.
+                .run_if(bevy::ecs::schedule::common_conditions::resource_exists::<RenderRequest>),
+        );
+
+        app.finish();
+        app.cleanup();
+        // Warmup tick #1: Startup runs (camera, lights, render target spawn).
+        app.update();
+
+        // Install scene + warmup render request. The warmup output is discarded
+        // — its purpose is to pay PSO compilation and material application
+        // upfront so the first user-facing render() is fast.
+        let initial_request = RenderRequest {
+            mesh_path: mesh_path.display().to_string(),
+            texture_path: texture_path.display().to_string(),
+            camera_transform: Transform::default(),
+            object_rotation: ObjectRotation::identity(),
+            config: render_config.clone(),
+        };
+
+        {
+            let world = app.world_mut();
+            let asset_server = world.resource::<AssetServer>().clone();
+            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
+            let texture_handle: Handle<Image> =
+                asset_server.load(texture_path.display().to_string());
+            world.insert_resource(LoadedScene(scene_handle.clone()));
+            world.insert_resource(LoadedTexture(texture_handle));
+            world.insert_resource(initial_request);
+            world.spawn((
+                SceneRoot(scene_handle),
+                Transform::from_rotation(ObjectRotation::identity().to_quat()),
+                RenderedObject,
+                PersistentScene,
+            ));
+            world.insert_resource(HeadlessBatchSequence::new(vec![Transform::default()]));
+        }
+
+        // Drive the warmup render to completion.
+        let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                return Err(crate::RenderError::RenderFailed(format!(
+                    "PersistentRenderer::new warmup render timed out after {RENDER_TIMEOUT_SECS}s"
+                )));
+            }
+            app.update();
+            if app.world().resource::<HeadlessBatchSequence>().done {
+                break;
+            }
+        }
+        // Discard the warmup output so it doesn't leak into the first real
+        // render() call's output buffer.
+        app.world_mut()
+            .resource_mut::<HeadlessBatchSequence>()
+            .outputs
+            .clear();
+
+        Ok(Self {
+            app,
+            object_dir,
+            render_config: render_config.clone(),
+            shared_rgba,
+            shared_depth,
+            _not_send_sync: std::marker::PhantomData,
+        })
+    }
+
+    /// Render one frame from the given camera transform and object rotation.
+    /// Reuses the loaded scene + warm PSO cache from `new()`.
+    pub fn render(
+        &mut self,
+        camera_transform: &Transform,
+        object_rotation: &ObjectRotation,
+    ) -> Result<RenderOutput, crate::RenderError> {
+        let camera_transform = *camera_transform;
+        let object_rotation_owned = object_rotation.clone();
+
+        {
+            let world = self.app.world_mut();
+
+            // Update the persistent scene root rotation. Always-write avoids
+            // the cost of an extra ObjectRotation comparison per call; the
+            // mutation itself is a single Transform write.
+            let scene_entity = world
+                .query_filtered::<Entity, With<PersistentScene>>()
+                .iter(world)
+                .next();
+            if let Some(entity) = scene_entity {
+                if let Some(mut transform) = world.entity_mut(entity).get_mut::<Transform>() {
+                    *transform = Transform::from_rotation(object_rotation_owned.to_quat());
+                }
+            }
+
+            // Update the camera transform.
+            let cam_entity = world
+                .query_filtered::<Entity, With<RenderCamera>>()
+                .iter(world)
+                .next();
+            if let Some(cam) = cam_entity {
+                if let Some(mut transform) = world.entity_mut(cam).get_mut::<Transform>() {
+                    *transform = camera_transform;
+                }
+            }
+
+            // Reset per-frame state, preserving scene_loaded / texture_loaded
+            // / materials_applied / materials_applied_frame. The asset-load
+            // and material-apply work was paid in `new()`'s warmup; we only
+            // need to clear the per-capture state.
+            //
+            // `capture_ready = true` short-circuits `apply_materials` on
+            // every tick of the render loop (no need to re-check material
+            // application — it stays applied for the renderer's lifetime).
+            // It does NOT short-circuit `request_headless_capture`, which
+            // is gated by `HeadlessBatchSequence::warmup_frames_remaining`
+            // below. Bug fix from PR #66 review (off-by-one / blank-step-0):
+            // without that warmup gate, request_headless_capture fires same-
+            // tick as the transform writes, capturing the previous render's
+            // target before the new transforms have propagated.
+            {
+                let mut state = world.resource_mut::<RenderState>();
+                state.exit_requested = false;
+                state.screenshot_requested = false;
+                state.captured = false;
+                state.rgba_data = None;
+                state.depth_data = None;
+                state.frame_count = 0;
+                state.image_width = 0;
+                state.image_height = 0;
+                state.capture_ready = true;
+            }
+
+            // Clear shared GPU readback buffers so a stale payload from the
+            // previous render() can't leak into this call's output.
+            if let Ok(mut guard) = self.shared_rgba.0.lock() {
+                *guard = None;
+            }
+            if let Ok(mut guard) = self.shared_depth.0.lock() {
+                *guard = None;
+            }
+
+            // Update RenderRequest (used by extract_and_continue_headless_batch
+            // to stamp the output with the right intrinsics + rotation).
+            {
+                let mut req = world.resource_mut::<RenderRequest>();
+                req.camera_transform = camera_transform;
+                req.object_rotation = object_rotation_owned.clone();
+            }
+
+            // Install fresh single-element batch with warmup frames so
+            // `request_headless_capture` is gated until the new transforms
+            // have propagated through the render pipeline.
+            let mut batch = HeadlessBatchSequence::new(vec![camera_transform]);
+            batch.warmup_frames_remaining = PERSISTENT_WARMUP_FRAMES;
+            world.insert_resource(batch);
+        }
+
+        let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                return Err(crate::RenderError::RenderFailed(format!(
+                    "PersistentRenderer::render timed out after {RENDER_TIMEOUT_SECS}s"
+                )));
+            }
+            self.app.update();
+            if self.app.world().resource::<HeadlessBatchSequence>().done {
+                break;
+            }
+        }
+
+        let mut sequence = self.app.world_mut().resource_mut::<HeadlessBatchSequence>();
+        let mut outputs = std::mem::take(&mut sequence.outputs);
+        if outputs.len() != 1 {
+            return Err(crate::RenderError::RenderFailed(format!(
+                "PersistentRenderer::render expected 1 output, got {}",
+                outputs.len()
+            )));
+        }
+
+        Ok(outputs.remove(0))
+    }
+
+    /// Path to the YCB object directory this renderer was bound to.
+    pub fn object_dir(&self) -> &Path {
+        &self.object_dir
+    }
+
+    /// The `RenderConfig` this renderer was constructed with.
+    pub fn render_config(&self) -> &RenderConfig {
+        &self.render_config
+    }
+
+    /// Explicit close. Equivalent to dropping; provided to match the API
+    /// proposal in #65 for callers that want lifetime-explicit teardown.
+    pub fn close(self) {
+        // Drop runs on return.
     }
 }
 

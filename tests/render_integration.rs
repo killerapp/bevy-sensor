@@ -18,8 +18,8 @@
 
 use bevy_sensor::{
     backend::detect_platform, batch::BatchRenderRequest, cache::ModelCache, render_batch,
-    render_to_buffer, render_to_buffer_cached, BatchRenderConfig, ObjectRotation, RenderConfig,
-    RenderOutput, RenderSession, ViewpointConfig,
+    render_to_buffer, render_to_buffer_cached, BatchRenderConfig, ObjectRotation,
+    PersistentRenderer, RenderConfig, RenderOutput, RenderSession, ViewpointConfig,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -788,4 +788,176 @@ fn test_cache_with_multiple_viewpoints() {
         render_count
     );
     println!("✓ Multiple viewpoints cache test passed");
+}
+
+/// Pixel-exact correctness gate for `PersistentRenderer` (issue #65) against
+/// the authoritative per-call `render_to_buffer()` path.
+///
+/// Validates that the in-place camera + scene-rotation mutation in
+/// `PersistentRenderer::render()` produces identical output to a freshly-built
+/// app per call, across:
+///   - multiple viewpoints (camera moves between calls — the surface-policy
+///     case)
+///   - multiple rotations (object rotation changes between calls)
+///   - both interleaved (rotation flips, then camera moves, then rotation
+///     flips again — catches state bleed in the rotation-mutation path)
+///
+/// Failure modes this catches:
+///   - SceneRoot Transform not updated → wrong rotation in the output.
+///   - Per-frame state reset misses a field → stale RGBA/depth from prior
+///     render leaks into output.
+///   - shared_rgba/depth buffer not cleared → next frame returns previous
+///     payload before new capture completes.
+///
+/// Requires native GPU. Skipped if YCB models aren't present.
+#[test]
+#[ignore]
+fn test_persistent_renderer_matches_render_to_buffer() {
+    println!("\n=== PersistentRenderer vs render_to_buffer pixel-exact gate ===");
+
+    let object_dir = PathBuf::from("/tmp/ycb/003_cracker_box");
+    if !object_dir.exists() {
+        println!("⚠ Skipping - YCB models not found at {:?}", object_dir);
+        return;
+    }
+
+    let viewpoint_config = ViewpointConfig::default();
+    let viewpoints = bevy_sensor::generate_viewpoints(&viewpoint_config);
+    let rotations = ObjectRotation::tbp_benchmark_rotations();
+    let config = RenderConfig::tbp_default();
+
+    // Build an interleaved sequence: alternate rotations across viewpoints to
+    // exercise the per-call rotation-mutation path, not just the camera-only
+    // path. 6 calls is enough to catch state bleed without making the test
+    // brutally slow.
+    let sequence: Vec<(ObjectRotation, &bevy::prelude::Transform)> = (0..6)
+        .map(|i| {
+            let rot = rotations[i % rotations.len()].clone();
+            let vp = &viewpoints[i % viewpoints.len()];
+            (rot, vp)
+        })
+        .collect();
+
+    // Reference: fresh render_to_buffer per call.
+    let reference: Vec<RenderOutput> = sequence
+        .iter()
+        .map(|(rot, vp)| {
+            render_to_buffer(&object_dir, vp, rot, &config).expect("reference render failed")
+        })
+        .collect();
+
+    // Persistent path: single renderer, N calls.
+    let mut renderer = PersistentRenderer::new(&object_dir, &config).expect("renderer init failed");
+    let persistent: Vec<RenderOutput> = sequence
+        .iter()
+        .map(|(rot, vp)| renderer.render(vp, rot).expect("persistent render failed"))
+        .collect();
+
+    for (idx, (r, p)) in reference.iter().zip(persistent.iter()).enumerate() {
+        assert_eq!(p.width, r.width, "step {idx}: width");
+        assert_eq!(p.height, r.height, "step {idx}: height");
+        assert_eq!(p.intrinsics, r.intrinsics, "step {idx}: intrinsics");
+        assert_eq!(
+            p.rgba, r.rgba,
+            "step {idx}: RGBA differs between PersistentRenderer and render_to_buffer"
+        );
+        assert_eq!(p.depth.len(), r.depth.len(), "step {idx}: depth length");
+        let max_delta = p
+            .depth
+            .iter()
+            .zip(r.depth.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_delta <= 1e-9,
+            "step {idx}: depth max delta {max_delta} exceeds 1e-9"
+        );
+        println!("  ✓ step {idx} pixel-exact");
+    }
+
+    println!("✓ PersistentRenderer pixel-exact gate PASSED");
+}
+
+/// Throughput smoke gate: `PersistentRenderer` should be at least as fast as
+/// constructing a fresh `RenderSession` per single-viewpoint call. Real
+/// speedup numbers come from the `examples/persistent_per_step.rs` bench;
+/// this test just guards the correctness assumption that the per-call
+/// scene-mutation path doesn't regress wall-clock vs. per-call session
+/// rebuild.
+///
+/// Requires native GPU.
+#[test]
+#[ignore]
+fn test_persistent_renderer_per_step_throughput_smoke() {
+    println!("\n=== PersistentRenderer per-step throughput smoke ===");
+
+    let object_dir = PathBuf::from("/tmp/ycb/003_cracker_box");
+    if !object_dir.exists() {
+        println!("⚠ Skipping - YCB models not found");
+        return;
+    }
+
+    let viewpoint_config = ViewpointConfig::default();
+    let viewpoints = bevy_sensor::generate_viewpoints(&viewpoint_config);
+    let config = RenderConfig::tbp_default();
+    let rotation = ObjectRotation::identity();
+    const STEPS: usize = 20;
+
+    // PersistentRenderer: one renderer, STEPS render() calls.
+    let t0 = Instant::now();
+    let mut renderer =
+        PersistentRenderer::new(&object_dir, &config).expect("persistent init failed");
+    let persistent_init = t0.elapsed();
+    let t1 = Instant::now();
+    for i in 0..STEPS {
+        let vp = &viewpoints[i % viewpoints.len()];
+        let _ = renderer
+            .render(vp, &rotation)
+            .expect("persistent render failed");
+    }
+    let persistent_steps = t1.elapsed();
+
+    // Per-step RenderSession: fresh session per call (matches the ergonomic
+    // shape neocortx would use today without PersistentRenderer).
+    let t2 = Instant::now();
+    for i in 0..STEPS {
+        let vp = &viewpoints[i % viewpoints.len()];
+        let mut session = RenderSession::new(&config).expect("session init failed");
+        let req = BatchRenderRequest {
+            object_dir: object_dir.clone(),
+            viewpoint: *vp,
+            object_rotation: rotation.clone(),
+            render_config: config.clone(),
+        };
+        let _ = session.render(&[req]).expect("session render failed");
+    }
+    let per_step_session = t2.elapsed();
+
+    let persistent_per_step_ms = persistent_steps.as_secs_f64() * 1000.0 / STEPS as f64;
+    let session_per_step_ms = per_step_session.as_secs_f64() * 1000.0 / STEPS as f64;
+
+    println!(
+        "  PersistentRenderer: init {:.0} ms, {} steps in {:.0} ms ({:.1} ms/step)",
+        persistent_init.as_secs_f64() * 1000.0,
+        STEPS,
+        persistent_steps.as_secs_f64() * 1000.0,
+        persistent_per_step_ms,
+    );
+    println!(
+        "  Fresh RenderSession per call: {} steps in {:.0} ms ({:.1} ms/step)",
+        STEPS,
+        per_step_session.as_secs_f64() * 1000.0,
+        session_per_step_ms,
+    );
+    let speedup = session_per_step_ms / persistent_per_step_ms;
+    println!("  Speedup vs fresh session per call: {:.2}x", speedup);
+
+    assert!(
+        persistent_per_step_ms <= session_per_step_ms,
+        "PersistentRenderer per-step ({:.1} ms) should be <= fresh-session-per-call ({:.1} ms)",
+        persistent_per_step_ms,
+        session_per_step_ms,
+    );
+
+    println!("✓ Throughput smoke PASSED");
 }
