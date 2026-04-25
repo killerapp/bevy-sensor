@@ -90,6 +90,28 @@ const RENDER_TIMEOUT_SECS: u64 = 180;
 /// `test_batch_render_matches_sequential_episode_outputs`.
 const BATCH_WARMUP_FRAMES: u32 = 1;
 
+/// Warmup frames at the start of each `PersistentRenderer::render()` call.
+///
+/// `BATCH_WARMUP_FRAMES = 1` works for inter-viewpoint advancement inside a
+/// batch because `extract_and_continue_headless_batch` writes the next
+/// camera transform *and* clears the shared GPU readback buffers in the
+/// same tick — so the in-flight copy from the previous viewpoint has
+/// already drained by the time the next capture is gated.
+///
+/// In the persistent per-call path, the previous render's output may still
+/// be sitting in `shared_rgba`/`shared_depth` (we clear them before the
+/// loop, but the pipeline still needs ticks to propagate the new camera/
+/// scene-rotation `Transform` writes through `PostUpdate` →
+/// `transform_propagate` → `Extract` → render graph → `ImageCopyDriver`
+/// before the capture we request actually reflects the new transforms.
+///
+/// Validated by `test_persistent_renderer_matches_render_to_buffer`. Two
+/// ticks of warmup gives:
+///   - tick 0: transforms propagate, render runs (no copy enabled)
+///   - tick 1: warmup hits 0, capture fires, render runs with copy enabled
+///   - tick 2: shared buffers populated → captured → batch finalized
+const PERSISTENT_WARMUP_FRAMES: u32 = 2;
+
 /// Check the render-trace env var. Cheap enough (single HashMap lookup) to call
 /// from per-frame systems; gate all tracing output behind this.
 #[inline]
@@ -2813,12 +2835,11 @@ impl PersistentRenderer {
         object_dir: &Path,
         render_config: &RenderConfig,
     ) -> Result<Self, crate::RenderError> {
-        let object_dir = std::fs::canonicalize(object_dir).map_err(|e| {
-            crate::RenderError::FileNotFound {
+        let object_dir =
+            std::fs::canonicalize(object_dir).map_err(|e| crate::RenderError::FileNotFound {
                 path: object_dir.display().to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
         let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
         if !mesh_path.exists() {
@@ -2896,8 +2917,7 @@ impl PersistentRenderer {
         {
             let world = app.world_mut();
             let asset_server = world.resource::<AssetServer>().clone();
-            let scene_handle: Handle<Scene> =
-                asset_server.load(mesh_path.display().to_string());
+            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
             let texture_handle: Handle<Image> =
                 asset_server.load(texture_path.display().to_string());
             world.insert_resource(LoadedScene(scene_handle.clone()));
@@ -2981,8 +3001,19 @@ impl PersistentRenderer {
             }
 
             // Reset per-frame state, preserving scene_loaded / texture_loaded
-            // / materials_applied so apply_materials short-circuits and the
-            // capture chain runs immediately.
+            // / materials_applied / materials_applied_frame. The asset-load
+            // and material-apply work was paid in `new()`'s warmup; we only
+            // need to clear the per-capture state.
+            //
+            // `capture_ready = true` short-circuits `apply_materials` on
+            // every tick of the render loop (no need to re-check material
+            // application — it stays applied for the renderer's lifetime).
+            // It does NOT short-circuit `request_headless_capture`, which
+            // is gated by `HeadlessBatchSequence::warmup_frames_remaining`
+            // below. Bug fix from PR #66 review (off-by-one / blank-step-0):
+            // without that warmup gate, request_headless_capture fires same-
+            // tick as the transform writes, capturing the previous render's
+            // target before the new transforms have propagated.
             {
                 let mut state = world.resource_mut::<RenderState>();
                 state.exit_requested = false;
@@ -3013,8 +3044,12 @@ impl PersistentRenderer {
                 req.object_rotation = object_rotation_owned.clone();
             }
 
-            // Install fresh single-element batch.
-            world.insert_resource(HeadlessBatchSequence::new(vec![camera_transform]));
+            // Install fresh single-element batch with warmup frames so
+            // `request_headless_capture` is gated until the new transforms
+            // have propagated through the render pipeline.
+            let mut batch = HeadlessBatchSequence::new(vec![camera_transform]);
+            batch.warmup_frames_remaining = PERSISTENT_WARMUP_FRAMES;
+            world.insert_resource(batch);
         }
 
         let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);

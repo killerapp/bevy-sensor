@@ -66,7 +66,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !object_dir.exists() {
         eprintln!("Object directory not found: {object_dir:?}");
-        eprintln!("Run: bevy_sensor::ycb::download_models(\"/tmp/ycb\", Subset::Representative).await?;");
+        eprintln!(
+            "Run: bevy_sensor::ycb::download_models(\"/tmp/ycb\", Subset::Representative).await?;"
+        );
         return Err("Object directory not found".into());
     }
 
@@ -140,10 +142,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.close();
 
     println!();
-    println!("Speedup vs render_to_buffer per call: {:.2}x",
-        baseline_per_step / persistent_per_step);
-    println!("Speedup vs fresh RenderSession per call: {:.2}x",
-        session_per_step / persistent_per_step);
+    println!(
+        "Speedup vs render_to_buffer per call: {:.2}x",
+        baseline_per_step / persistent_per_step
+    );
+    println!(
+        "Speedup vs fresh RenderSession per call: {:.2}x",
+        session_per_step / persistent_per_step
+    );
 
     Ok(())
 }

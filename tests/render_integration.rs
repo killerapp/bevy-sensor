@@ -847,8 +847,7 @@ fn test_persistent_renderer_matches_render_to_buffer() {
         .collect();
 
     // Persistent path: single renderer, N calls.
-    let mut renderer =
-        PersistentRenderer::new(&object_dir, &config).expect("renderer init failed");
+    let mut renderer = PersistentRenderer::new(&object_dir, &config).expect("renderer init failed");
     let persistent: Vec<RenderOutput> = sequence
         .iter()
         .map(|(rot, vp)| renderer.render(vp, rot).expect("persistent render failed"))
@@ -912,7 +911,9 @@ fn test_persistent_renderer_per_step_throughput_smoke() {
     let t1 = Instant::now();
     for i in 0..STEPS {
         let vp = &viewpoints[i % viewpoints.len()];
-        let _ = renderer.render(vp, &rotation).expect("persistent render failed");
+        let _ = renderer
+            .render(vp, &rotation)
+            .expect("persistent render failed");
     }
     let persistent_steps = t1.elapsed();
 
@@ -932,8 +933,7 @@ fn test_persistent_renderer_per_step_throughput_smoke() {
     }
     let per_step_session = t2.elapsed();
 
-    let persistent_per_step_ms =
-        persistent_steps.as_secs_f64() * 1000.0 / STEPS as f64;
+    let persistent_per_step_ms = persistent_steps.as_secs_f64() * 1000.0 / STEPS as f64;
     let session_per_step_ms = per_step_session.as_secs_f64() * 1000.0 / STEPS as f64;
 
     println!(
