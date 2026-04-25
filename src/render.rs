@@ -105,12 +105,14 @@ const BATCH_WARMUP_FRAMES: u32 = 1;
 /// `transform_propagate` → `Extract` → render graph → `ImageCopyDriver`
 /// before the capture we request actually reflects the new transforms.
 ///
-/// Validated by `test_persistent_renderer_matches_render_to_buffer`. Two
-/// ticks of warmup gives:
+/// Validated by `test_persistent_renderer_matches_render_to_buffer`. Three
+/// ticks of warmup gives Windows/DX12 enough room to drain the previous
+/// readback and capture the post-propagation color target:
 ///   - tick 0: transforms propagate, render runs (no copy enabled)
-///   - tick 1: warmup hits 0, capture fires, render runs with copy enabled
-///   - tick 2: shared buffers populated → captured → batch finalized
-const PERSISTENT_WARMUP_FRAMES: u32 = 2;
+///   - tick 1: previous in-flight readback drains (no copy enabled)
+///   - tick 2: warmup hits 0, capture fires, render runs with copy enabled
+///   - tick 3: shared buffers populated → captured → batch finalized
+const PERSISTENT_WARMUP_FRAMES: u32 = 3;
 
 /// Check the render-trace env var. Cheap enough (single HashMap lookup) to call
 /// from per-frame systems; gate all tracing output behind this.
