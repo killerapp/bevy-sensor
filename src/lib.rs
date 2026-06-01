@@ -427,7 +427,7 @@ pub struct RenderConfig {
     pub width: u32,
     /// Image height in pixels (default: 64)
     pub height: u32,
-    /// Zoom factor affecting field of view (default: 1.0)
+    /// Zoom factor affecting field of view (`tbp_default`: 4.0)
     /// Use >1 to zoom in (narrower FOV), <1 to zoom out (wider FOV)
     pub zoom: f32,
     /// Near clipping plane in meters (default: 0.01)
@@ -517,11 +517,11 @@ impl Default for RenderConfig {
 impl RenderConfig {
     /// TBP-compatible 64x64 RGBD patch sensor configuration.
     ///
-    /// Matches TBP's habitat distant patch sensor: 64x64 resolution with
-    /// zoom=10 (90° base HFOV → ~9° effective FOV), producing a tight view
-    /// of the object's surface patch.
+    /// Uses TBP's 90° base-HFOV zoom formula with a 64x64 patch render. TBP's
+    /// Habitat patch sensor uses zoom=10 with a separate viewfinder; the current
+    /// single-sensor YCB benchmark keeps zoom=4 for centering stability.
     ///
-    /// TBP ref: `missing_depthto3d_sensor2_semantic0.yaml` (zoom=10)
+    /// TBP ref: `missing_depthto3d_sensor2_semantic0.yaml` (zoom=10 upstream)
     pub fn tbp_default() -> Self {
         Self {
             width: 64,
@@ -577,18 +577,20 @@ impl RenderConfig {
     ///
     /// TBP ref: `transforms.py:440` `fx = np.tan(hfov[i] / 2.0) / zoom`
     pub fn intrinsics(&self) -> CameraIntrinsics {
-        self.intrinsics_for_dimensions(self.width, self.height)
+        self.intrinsics_for_size(self.width, self.height)
     }
 
-    /// Compute camera intrinsics for a captured image size using this config's
-    /// projection parameters.
-    pub fn intrinsics_for_dimensions(&self, width: u32, height: u32) -> CameraIntrinsics {
+    /// Compute camera intrinsics for a concrete render target size.
+    ///
+    /// This keeps readback metadata aligned with the actual image dimensions
+    /// while preserving TBP's focal-length-space zoom formula.
+    pub fn intrinsics_for_size(&self, width: u32, height: u32) -> CameraIntrinsics {
         let base_hfov_rad = 90.0_f64.to_radians();
         // TBP normalized focal length: fx_norm = tan(hfov/2) / zoom
         let fx_norm = (base_hfov_rad / 2.0).tan() / self.zoom as f64;
         // Convert to pixel focal length: fx_pixel = (width/2) / fx_norm
         let fx = (width as f64 / 2.0) / fx_norm;
-        let fy = (height as f64 / 2.0) / fx_norm;
+        let fy = fx; // Square pixels (TBP adjusts fy for aspect ratio, but we use 64x64)
 
         CameraIntrinsics {
             focal_length: [fx, fy],
@@ -1414,28 +1416,40 @@ mod tests {
     }
 
     #[test]
-    fn test_render_config_intrinsics_for_dimensions_matches_default_size() {
-        let config = RenderConfig::tbp_default();
-        assert_eq!(
-            config.intrinsics_for_dimensions(config.width, config.height),
-            config.intrinsics()
-        );
-    }
-
-    #[test]
-    fn test_render_config_intrinsics_follow_projection_formula() {
+    fn test_render_config_intrinsics_for_size_uses_tbp_zoom_formula() {
         let config = RenderConfig {
             width: 64,
-            height: 32,
+            height: 64,
             zoom: 4.0,
             ..RenderConfig::tbp_default()
         };
-        let intrinsics = config.intrinsics();
 
+        let intrinsics = config.intrinsics_for_size(64, 64);
+
+        // TBP formula for 90° base HFOV:
+        // fx = (width / 2) / (tan(45°) / zoom) = (width / 2) * zoom.
         assert!((intrinsics.focal_length[0] - 128.0).abs() < 1e-9);
-        assert!((intrinsics.focal_length[1] - 64.0).abs() < 1e-9);
-        assert_eq!(intrinsics.principal_point, [32.0, 16.0]);
-        assert_eq!(intrinsics.image_size, [64, 32]);
+        assert!((intrinsics.focal_length[1] - 128.0).abs() < 1e-9);
+        assert_ne!(intrinsics.focal_length[0], 64.0 * config.zoom as f64);
+        assert_eq!(intrinsics.principal_point, [32.0, 32.0]);
+        assert_eq!(intrinsics.image_size, [64, 64]);
+    }
+
+    #[test]
+    fn test_render_config_intrinsics_for_size_tracks_actual_readback_size() {
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            zoom: 4.0,
+            ..RenderConfig::tbp_default()
+        };
+
+        let intrinsics = config.intrinsics_for_size(128, 96);
+
+        assert!((intrinsics.focal_length[0] - 256.0).abs() < 1e-9);
+        assert!((intrinsics.focal_length[1] - 256.0).abs() < 1e-9);
+        assert_eq!(intrinsics.principal_point, [64.0, 48.0]);
+        assert_eq!(intrinsics.image_size, [128, 96]);
     }
 
     #[test]

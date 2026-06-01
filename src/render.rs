@@ -1885,7 +1885,8 @@ fn extract_and_exit(
         let width = state.image_width;
         let height = state.image_height;
 
-        let intrinsics = request.config.intrinsics_for_dimensions(width, height);
+        // Compute intrinsics from the same TBP zoom formula as the camera projection.
+        let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
             rgba: rgba.clone(),
@@ -2211,7 +2212,8 @@ fn extract_and_exit_headless(
         let width = state.image_width;
         let height = state.image_height;
 
-        let intrinsics = request.config.intrinsics_for_dimensions(width, height);
+        // Compute intrinsics from the same TBP zoom formula as the camera projection.
+        let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
             rgba: rgba.clone(),
@@ -2286,7 +2288,7 @@ fn extract_and_continue_headless_batch(
         let width = state.image_width;
         let height = state.image_height;
 
-        let intrinsics = request.config.intrinsics_for_dimensions(width, height);
+        let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
             rgba: rgba.clone(),

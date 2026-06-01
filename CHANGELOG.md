@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/killerapp/bevy-sensor/compare/v0.5.3...v0.5.4) - 2026-06-01
+
+### Fixed
+
+- *(render)* align output intrinsics with TBP zoom formula ([#73](https://github.com/killerapp/bevy-sensor/pull/73))
+
+## [0.5.3](https://github.com/killerapp/bevy-sensor/compare/v0.5.2...v0.5.3) - 2026-04-25
+
+### Fixed
+
+- *(release)* keep 0.x features as minor bumps ([#68](https://github.com/killerapp/bevy-sensor/pull/68))
+
 ## [0.5.2](https://github.com/killerapp/bevy-sensor/compare/v0.5.1...v0.5.2) - 2026-04-25
 
 ### Added
