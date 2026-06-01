@@ -3,6 +3,7 @@ use bevy_sensor::{
     REPRESENTATIVE_OBJECTS as REEXPORTED_REPRESENTATIVE_OBJECTS,
     TBP_STANDARD_OBJECTS as REEXPORTED_TBP_STANDARD_OBJECTS,
 };
+use std::fs;
 use std::path::Path;
 
 #[test]
@@ -20,4 +21,36 @@ fn public_ycb_constants_expose_expected_downstream_sets() {
 fn public_ycb_download_objects_is_callable_without_internal_imports() {
     let future = ycb::download_objects(Path::new("."), &["003_cracker_box"]);
     drop(future);
+}
+
+#[test]
+fn public_ycb_objects_exist_validates_requested_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mesh = ycb::object_mesh_path(dir.path(), "003_cracker_box");
+    let texture = ycb::object_texture_path(dir.path(), "003_cracker_box");
+    fs::create_dir_all(mesh.parent().expect("mesh parent")).expect("create object dir");
+    fs::write(&mesh, b"").expect("write mesh marker");
+    fs::write(&texture, b"").expect("write texture marker");
+
+    assert!(ycb::objects_exist(dir.path(), &["003_cracker_box"]));
+    assert!(!ycb::objects_exist(
+        dir.path(),
+        &["003_cracker_box", "004_sugar_box"]
+    ));
+    assert_eq!(
+        ycb::missing_objects(dir.path(), &["003_cracker_box", "004_sugar_box"]),
+        vec!["004_sugar_box".to_string()]
+    );
+}
+
+#[test]
+fn public_ycb_models_exist_requires_representative_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mesh = ycb::object_mesh_path(dir.path(), "003_cracker_box");
+    let texture = ycb::object_texture_path(dir.path(), "003_cracker_box");
+    fs::create_dir_all(mesh.parent().expect("mesh parent")).expect("create object dir");
+    fs::write(&mesh, b"").expect("write mesh marker");
+    fs::write(&texture, b"").expect("write texture marker");
+
+    assert!(!ycb::models_exist(dir.path()));
 }

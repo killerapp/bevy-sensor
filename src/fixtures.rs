@@ -249,7 +249,9 @@ impl TestFixtures {
 
         // Load depth from binary
         let depth_path = self.root.join(object_id).join(&render_meta.depth_file);
-        let depth = load_depth_binary(&depth_path)?;
+        let expected_depth_values =
+            (self.metadata.resolution[0] as usize) * (self.metadata.resolution[1] as usize);
+        let depth = load_depth_binary(&depth_path, expected_depth_values)?;
 
         // Build camera transform from position (looking at origin)
         let pos = render_meta.camera_position;
@@ -314,20 +316,37 @@ fn load_rgba_png(path: &Path) -> Result<Vec<u8>, FixtureError> {
     Ok(rgba.into_raw())
 }
 
-/// Load depth data from binary f32 file and convert to f64 for TBP precision
-fn load_depth_binary(path: &Path) -> Result<Vec<f64>, FixtureError> {
+/// Load depth data from binary f32 or f64 file and normalize to f64 for TBP precision.
+fn load_depth_binary(path: &Path, expected_values: usize) -> Result<Vec<f64>, FixtureError> {
     let bytes = fs::read(path)?;
 
-    // Convert from little-endian bytes to f32, then to f64 for TBP precision
-    let depth: Vec<f64> = bytes
-        .chunks_exact(4)
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().unwrap();
-            f32::from_le_bytes(arr) as f64
-        })
-        .collect();
+    if bytes.len() == expected_values * std::mem::size_of::<f64>() {
+        return Ok(bytes
+            .chunks_exact(8)
+            .map(|chunk| {
+                let arr: [u8; 8] = chunk.try_into().unwrap();
+                f64::from_le_bytes(arr)
+            })
+            .collect());
+    }
 
-    Ok(depth)
+    if bytes.len() == expected_values * std::mem::size_of::<f32>() {
+        return Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| {
+                let arr: [u8; 4] = chunk.try_into().unwrap();
+                f32::from_le_bytes(arr) as f64
+            })
+            .collect());
+    }
+
+    Err(FixtureError::InvalidMetadata(format!(
+        "Depth file {} has {} bytes, expected {} f32 values or {} f64 values",
+        path.display(),
+        bytes.len(),
+        expected_values,
+        expected_values
+    )))
 }
 
 #[cfg(test)]
@@ -424,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_depth_binary() {
+    fn test_load_depth_binary_f32() {
         let temp_dir = TempDir::new().unwrap();
         let depth_path = temp_dir.path().join("test.depth");
 
@@ -434,12 +453,25 @@ mod tests {
         fs::write(&depth_path, &bytes).unwrap();
 
         // Load and verify
-        let loaded = load_depth_binary(&depth_path).unwrap();
+        let loaded = load_depth_binary(&depth_path, depths.len()).unwrap();
         assert_eq!(loaded.len(), 4);
         assert!((loaded[0] - 0.5).abs() < 0.001);
         assert!((loaded[1] - 1.0).abs() < 0.001);
         assert!((loaded[2] - 2.0).abs() < 0.001);
         assert!((loaded[3] - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_load_depth_binary_f64() {
+        let temp_dir = TempDir::new().unwrap();
+        let depth_path = temp_dir.path().join("test.depth");
+
+        let depths: Vec<f64> = vec![0.5, 1.0, 2.0, 10.0];
+        let bytes: Vec<u8> = depths.iter().flat_map(|f| f.to_le_bytes()).collect();
+        fs::write(&depth_path, &bytes).unwrap();
+
+        let loaded = load_depth_binary(&depth_path, depths.len()).unwrap();
+        assert_eq!(loaded, depths);
     }
 
     #[test]
