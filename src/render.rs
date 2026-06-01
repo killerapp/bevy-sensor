@@ -1885,16 +1885,8 @@ fn extract_and_exit(
         let width = state.image_width;
         let height = state.image_height;
 
-        // Compute intrinsics based on actual dimensions (f64 for TBP precision)
-        let config = &request.config;
-        let intrinsics = crate::CameraIntrinsics {
-            focal_length: [
-                width as f64 * config.zoom as f64,
-                height as f64 * config.zoom as f64,
-            ],
-            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
-            image_size: [width, height],
-        };
+        // Compute intrinsics from the same TBP zoom formula as the camera projection.
+        let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
             rgba: rgba.clone(),
@@ -2220,16 +2212,8 @@ fn extract_and_exit_headless(
         let width = state.image_width;
         let height = state.image_height;
 
-        // Compute intrinsics (f64 for TBP precision)
-        let config = &request.config;
-        let intrinsics = crate::CameraIntrinsics {
-            focal_length: [
-                width as f64 * config.zoom as f64,
-                height as f64 * config.zoom as f64,
-            ],
-            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
-            image_size: [width, height],
-        };
+        // Compute intrinsics from the same TBP zoom formula as the camera projection.
+        let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
             rgba: rgba.clone(),
@@ -2304,15 +2288,7 @@ fn extract_and_continue_headless_batch(
         let width = state.image_width;
         let height = state.image_height;
 
-        let config = &request.config;
-        let intrinsics = crate::CameraIntrinsics {
-            focal_length: [
-                width as f64 * config.zoom as f64,
-                height as f64 * config.zoom as f64,
-            ],
-            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
-            image_size: [width, height],
-        };
+        let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
             rgba: rgba.clone(),
