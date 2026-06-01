@@ -129,9 +129,23 @@ pub mod ycb {
         Ok(())
     }
 
-    /// Check if YCB models exist at the given path
+    /// Return object IDs whose standard `google_16k` mesh or texture is missing.
+    pub fn missing_objects<P: AsRef<Path>>(output_dir: P, object_ids: &[&str]) -> Vec<String> {
+        ycbust::validate_objects(output_dir.as_ref(), object_ids)
+            .into_iter()
+            .filter(|validation| !validation.is_complete())
+            .map(|validation| validation.name)
+            .collect()
+    }
+
+    /// Check if all requested YCB objects exist at the given path.
+    pub fn objects_exist<P: AsRef<Path>>(output_dir: P, object_ids: &[&str]) -> bool {
+        missing_objects(output_dir, object_ids).is_empty()
+    }
+
+    /// Check if the representative YCB models exist at the given path.
     pub fn models_exist<P: AsRef<Path>>(output_dir: P) -> bool {
-        ycbust::object_mesh_path(output_dir.as_ref(), "003_cracker_box").exists()
+        objects_exist(output_dir, REPRESENTATIVE_OBJECTS)
     }
 
     /// Get the path to a specific YCB object's OBJ file
