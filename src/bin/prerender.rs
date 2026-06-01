@@ -9,17 +9,19 @@
 //! Default output: test_fixtures/renders/
 //! Default objects: 003_cracker_box, 005_tomato_soup_can
 //!
-//! For single-render mode (used internally for subprocess rendering):
+//! For single-render mode:
 //!   cargo run --bin prerender -- --single-render --object <name> --rotation <idx> --viewpoint <idx> --output <dir>
 
 use bevy_sensor::ycb;
 use bevy_sensor::ycbust;
-use bevy_sensor::{generate_viewpoints, ObjectRotation, RenderConfig, ViewpointConfig};
+use bevy_sensor::{
+    generate_viewpoints, render_batch, BatchRenderConfig, BatchRenderOutput, BatchRenderRequest,
+    ObjectRotation, RenderConfig, RenderStatus, ViewpointConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Metadata for a pre-rendered dataset
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +83,7 @@ fn main() {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
-    // Check for single-render mode (used by batch subprocess)
+    // Keep single-render mode available for scripts that render one capture.
     if args.iter().any(|a| a == "--single-render") {
         run_single_render(&args);
         return;
@@ -267,11 +269,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     })?;
     println!("\nSaved dataset metadata to {:?}", metadata_path);
 
-    // Get the current executable path for subprocess spawning
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get current executable path: {}", e))?;
-
-    // Render each object using subprocesses
+    // Render each object in-process. Grouping by object and rotation lets the library reuse
+    // scene setup across the 24 viewpoints while keeping output filenames unchanged.
     let mut all_render_metadata: HashMap<String, Vec<RenderMetadata>> = HashMap::new();
 
     for object_id in &objects {
@@ -279,9 +278,11 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         let object_dir = ycb_dir.join(object_id);
         if !object_dir.exists() {
-            println!("  WARNING: Object directory not found: {:?}", object_dir);
-            println!("  Skipping...");
-            continue;
+            return Err(format!(
+                "Object directory not found after validation: {:?}",
+                object_dir
+            )
+            .into());
         }
 
         // Create object output directory
@@ -299,59 +300,57 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         let total_renders = viewpoints.len() * rotations.len();
 
         for (rot_idx, rotation) in rotations.iter().enumerate() {
-            for (view_idx, viewpoint) in viewpoints.iter().enumerate() {
-                // Spawn subprocess to render this viewpoint
-                let status = Command::new(&exe_path)
-                    .arg("--single-render")
-                    .arg("--object")
-                    .arg(object_id)
-                    .arg("--rotation")
-                    .arg(rot_idx.to_string())
-                    .arg("--viewpoint")
-                    .arg(view_idx.to_string())
-                    .arg("--output")
-                    .arg(&output_dir)
-                    .arg("--data-dir")
-                    .arg(&data_dir_str)
-                    .status();
+            let requests: Vec<BatchRenderRequest> = viewpoints
+                .iter()
+                .map(|viewpoint| BatchRenderRequest {
+                    object_dir: object_dir.clone(),
+                    viewpoint: *viewpoint,
+                    object_rotation: rotation.clone(),
+                    render_config: render_config.clone(),
+                })
+                .collect();
 
-                match status {
-                    Ok(exit_status) if exit_status.success() => {
-                        // Record metadata
-                        let camera_pos = viewpoint.translation;
-                        object_renders.push(RenderMetadata {
-                            object_id: object_id.clone(),
-                            rotation_index: rot_idx,
-                            viewpoint_index: view_idx,
-                            // Convert f64 rotation to f32 for JSON serialization
-                            rotation_euler: [
-                                rotation.pitch as f32,
-                                rotation.yaw as f32,
-                                rotation.roll as f32,
-                            ],
-                            camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
-                            rgba_file: format!("r{}_v{:02}.png", rot_idx, view_idx),
-                            depth_file: format!("r{}_v{:02}.depth", rot_idx, view_idx),
-                        });
+            let outputs = render_batch(requests, &BatchRenderConfig::default()).map_err(|e| {
+                format!("Failed to render {} rotation {}: {}", object_id, rot_idx, e)
+            })?;
 
-                        render_count += 1;
-                        print!("\r  Rendered {}/{}", render_count, total_renders);
-                        use std::io::Write;
-                        std::io::stdout().flush().ok();
-                    }
-                    Ok(exit_status) => {
-                        println!(
-                            "\n  ERROR rendering r{}_v{}: subprocess exited with {:?}",
-                            rot_idx, view_idx, exit_status
-                        );
-                    }
-                    Err(e) => {
-                        println!(
-                            "\n  ERROR rendering r{}_v{}: failed to spawn subprocess: {:?}",
-                            rot_idx, view_idx, e
-                        );
-                    }
+            for (view_idx, output) in outputs.iter().enumerate() {
+                if output.status != RenderStatus::Success {
+                    return Err(format!(
+                        "Render failed for {} r{}_v{:02}: {:?}",
+                        object_id, rot_idx, view_idx, output.error_message
+                    )
+                    .into());
                 }
+
+                let rgba_file = format!("r{}_v{:02}.png", rot_idx, view_idx);
+                let depth_file = format!("r{}_v{:02}.depth", rot_idx, view_idx);
+                save_batch_render_output(
+                    output,
+                    &object_output.join(&rgba_file),
+                    &object_output.join(&depth_file),
+                )?;
+
+                let camera_pos = output.request.viewpoint.translation;
+                object_renders.push(RenderMetadata {
+                    object_id: object_id.clone(),
+                    rotation_index: rot_idx,
+                    viewpoint_index: view_idx,
+                    // Convert f64 rotation to f32 for JSON serialization
+                    rotation_euler: [
+                        rotation.pitch as f32,
+                        rotation.yaw as f32,
+                        rotation.roll as f32,
+                    ],
+                    camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
+                    rgba_file,
+                    depth_file,
+                });
+
+                render_count += 1;
+                print!("\r  Rendered {}/{}", render_count, total_renders);
+                use std::io::Write;
+                std::io::stdout().flush().ok();
             }
         }
         println!();
@@ -378,6 +377,35 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Output directory: {:?}", output_path);
     println!("\nTo use in tests:");
     println!("  let fixtures = TestFixtures::load(\"test_fixtures/renders\");");
+
+    Ok(())
+}
+
+fn save_batch_render_output(
+    output: &BatchRenderOutput,
+    rgba_path: &Path,
+    depth_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = rgba_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    image::save_buffer(
+        rgba_path,
+        &output.rgba,
+        output.width,
+        output.height,
+        image::ColorType::Rgba8,
+    )?;
+
+    if let Some(parent) = depth_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let depth_bytes: Vec<u8> = output
+        .depth
+        .iter()
+        .flat_map(|depth| depth.to_le_bytes())
+        .collect();
+    fs::write(depth_path, depth_bytes)?;
 
     Ok(())
 }
