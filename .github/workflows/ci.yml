@@ -16,6 +16,19 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  windows-check:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-Cdebuginfo=0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
   clippy:
     runs-on: ubuntu-latest
     steps:
