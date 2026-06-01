@@ -15,7 +15,7 @@ This crate is intentionally narrow in scope: it exists to support TBP-compatible
 
 ## Requirements
 
-- **Rust:** 1.70+
+- **Rust:** 1.82+ (Bevy 0.15 MSRV)
 - **Bevy:** 0.15+
 - **System:** Linux with Vulkan drivers (or WSL2).
 - **Tools:** `just` (recommended command runner).
@@ -33,6 +33,14 @@ This crate is intentionally narrow in scope: it exists to support TBP-compatible
     # Models will be automatically downloaded to /tmp/ycb if missing.
     # To use a custom location: cargo run --bin prerender -- --data-dir ./my_models ...
     # Output saved to test_fixtures/renders/
+    ```
+
+    On memory-constrained Windows machines, build once before running large
+    benchmarks and limit Cargo parallelism:
+    ```powershell
+    $env:CARGO_BUILD_JOBS = "1"
+    cargo build --bin prerender
+    just render-tbp-benchmark
     ```
 
 ## Usage

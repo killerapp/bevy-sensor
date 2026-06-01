@@ -129,9 +129,23 @@ pub mod ycb {
         Ok(())
     }
 
-    /// Check if YCB models exist at the given path
+    /// Return object IDs whose standard `google_16k` mesh or texture is missing.
+    pub fn missing_objects<P: AsRef<Path>>(output_dir: P, object_ids: &[&str]) -> Vec<String> {
+        ycbust::validate_objects(output_dir.as_ref(), object_ids)
+            .into_iter()
+            .filter(|validation| !validation.is_complete())
+            .map(|validation| validation.name)
+            .collect()
+    }
+
+    /// Check if all requested YCB objects exist at the given path.
+    pub fn objects_exist<P: AsRef<Path>>(output_dir: P, object_ids: &[&str]) -> bool {
+        missing_objects(output_dir, object_ids).is_empty()
+    }
+
+    /// Check if the representative YCB models exist at the given path.
     pub fn models_exist<P: AsRef<Path>>(output_dir: P) -> bool {
-        ycbust::object_mesh_path(output_dir.as_ref(), "003_cracker_box").exists()
+        objects_exist(output_dir, REPRESENTATIVE_OBJECTS)
     }
 
     /// Get the path to a specific YCB object's OBJ file
@@ -563,17 +577,23 @@ impl RenderConfig {
     ///
     /// TBP ref: `transforms.py:440` `fx = np.tan(hfov[i] / 2.0) / zoom`
     pub fn intrinsics(&self) -> CameraIntrinsics {
+        self.intrinsics_for_dimensions(self.width, self.height)
+    }
+
+    /// Compute camera intrinsics for a captured image size using this config's
+    /// projection parameters.
+    pub fn intrinsics_for_dimensions(&self, width: u32, height: u32) -> CameraIntrinsics {
         let base_hfov_rad = 90.0_f64.to_radians();
         // TBP normalized focal length: fx_norm = tan(hfov/2) / zoom
         let fx_norm = (base_hfov_rad / 2.0).tan() / self.zoom as f64;
         // Convert to pixel focal length: fx_pixel = (width/2) / fx_norm
-        let fx = (self.width as f64 / 2.0) / fx_norm;
-        let fy = fx; // Square pixels (TBP adjusts fy for aspect ratio, but we use 64x64)
+        let fx = (width as f64 / 2.0) / fx_norm;
+        let fy = (height as f64 / 2.0) / fx_norm;
 
         CameraIntrinsics {
             focal_length: [fx, fy],
-            principal_point: [self.width as f64 / 2.0, self.height as f64 / 2.0],
-            image_size: [self.width, self.height],
+            principal_point: [width as f64 / 2.0, height as f64 / 2.0],
+            image_size: [width, height],
         }
     }
 }
@@ -1391,6 +1411,31 @@ mod tests {
         // Square pixels: fx == fy.
         assert_eq!(intrinsics.focal_length[0], intrinsics.focal_length[1]);
         assert!(intrinsics.focal_length[0] > 0.0);
+    }
+
+    #[test]
+    fn test_render_config_intrinsics_for_dimensions_matches_default_size() {
+        let config = RenderConfig::tbp_default();
+        assert_eq!(
+            config.intrinsics_for_dimensions(config.width, config.height),
+            config.intrinsics()
+        );
+    }
+
+    #[test]
+    fn test_render_config_intrinsics_follow_projection_formula() {
+        let config = RenderConfig {
+            width: 64,
+            height: 32,
+            zoom: 4.0,
+            ..RenderConfig::tbp_default()
+        };
+        let intrinsics = config.intrinsics();
+
+        assert!((intrinsics.focal_length[0] - 128.0).abs() < 1e-9);
+        assert!((intrinsics.focal_length[1] - 64.0).abs() < 1e-9);
+        assert_eq!(intrinsics.principal_point, [32.0, 16.0]);
+        assert_eq!(intrinsics.image_size, [64, 32]);
     }
 
     #[test]

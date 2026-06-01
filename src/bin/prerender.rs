@@ -18,7 +18,7 @@ use bevy_sensor::{generate_viewpoints, ObjectRotation, RenderConfig, ViewpointCo
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Metadata for a pre-rendered dataset
@@ -116,21 +116,7 @@ fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let ycb_dir = PathBuf::from(&data_dir_str);
 
-    // Check if YCB models exist
-    if !ycb::models_exist(&ycb_dir) {
-        println!("\nYCB models not found at {:?}", ycb_dir);
-        println!("Downloading representative models...");
-
-        if let Err(e) = ycbust::blocking::download_ycb_blocking(
-            ycb::Subset::Representative,
-            &ycb_dir,
-            ycbust::DownloadOptions::default(),
-        ) {
-            eprintln!("Failed to download models: {}", e);
-            std::process::exit(1);
-        }
-        println!("Download complete.");
-    }
+    ensure_ycb_objects(&ycb_dir, &[object_id.as_str()])?;
 
     // Canonicalize to ensure absolute path for Bevy asset loading
     let ycb_dir = fs::canonicalize(&ycb_dir).unwrap_or(ycb_dir);
@@ -199,22 +185,9 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Data directory: {}", data_dir_str);
     println!("Objects: {:?}", objects);
 
-    // Check if YCB models exist
     let ycb_dir = PathBuf::from(&data_dir_str);
-    if !ycb::models_exist(&ycb_dir) {
-        println!("\nYCB models not found at {:?}", ycb_dir);
-        println!("Downloading representative models...");
-
-        if let Err(e) = ycbust::blocking::download_ycb_blocking(
-            ycb::Subset::Representative,
-            &ycb_dir,
-            ycbust::DownloadOptions::default(),
-        ) {
-            eprintln!("Failed to download models: {}", e);
-            std::process::exit(1);
-        }
-        println!("Download complete.");
-    }
+    let object_refs: Vec<&str> = objects.iter().map(String::as_str).collect();
+    ensure_ycb_objects(&ycb_dir, &object_refs)?;
 
     // Canonicalize to ensure absolute path for Bevy asset loading
     let ycb_dir = fs::canonicalize(&ycb_dir).unwrap_or(ycb_dir);
@@ -413,4 +386,36 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn ensure_ycb_objects(
+    ycb_dir: &Path,
+    object_ids: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let missing = ycb::missing_objects(ycb_dir, object_ids);
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    println!("\nMissing YCB objects at {:?}: {:?}", ycb_dir, missing);
+    println!("Downloading missing objects...");
+
+    let missing_refs: Vec<&str> = missing.iter().map(String::as_str).collect();
+    ycbust::blocking::download_objects_blocking(
+        &missing_refs,
+        ycb_dir,
+        ycbust::DownloadOptions::default(),
+    )?;
+
+    let still_missing = ycb::missing_objects(ycb_dir, object_ids);
+    if !still_missing.is_empty() {
+        return Err(format!(
+            "YCB download completed but objects are still incomplete: {:?}",
+            still_missing
+        )
+        .into());
+    }
+
+    println!("Download complete.");
+    Ok(())
 }
