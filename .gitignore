@@ -1,5 +1,8 @@
 /target
 *.png
+!docs/
+!docs/images/
+!docs/images/*.png
 assets/
 tmp_data/
 
