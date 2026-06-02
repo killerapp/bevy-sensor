@@ -51,11 +51,19 @@ const DEFAULT_PRESETS: &[(&str, f32, f32, [f64; 3])] = &[
     ("077_rubiks_cube", 45.0, 26.0, [18.0, 40.0, 8.0]),
 ];
 
+type ShowcaseResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> ShowcaseResult<()> {
     bevy_sensor::initialize();
 
     let options = parse_args();
+    generate_showcase(options).await?;
+
+    Ok(())
+}
+
+async fn generate_showcase(options: Options) -> ShowcaseResult<PathBuf> {
     let presets = build_presets(options.objects);
     let object_ids: Vec<&str> = presets
         .iter()
@@ -107,12 +115,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     std::fs::create_dir_all(&options.output_dir)?;
-    let sheet = contact_sheet(&tiles);
+    let showcase = compose_showcase_image(&tiles);
     let output_path = options.output_dir.join(OUTPUT_FILE);
-    sheet.save(&output_path)?;
+    showcase.save(&output_path)?;
     println!("Saved {}", output_path.display());
 
-    Ok(())
+    Ok(output_path)
 }
 
 fn parse_args() -> Options {
@@ -299,13 +307,13 @@ fn depth_tile(depth: &[f64], width: u32, height: u32, far_plane: f32) -> RgbaIma
     tile
 }
 
-fn contact_sheet(tiles: &[TilePair]) -> RgbaImage {
+fn compose_showcase_image(tiles: &[TilePair]) -> RgbaImage {
     let columns = MAX_COLUMNS.min(tiles.len().max(1) as u32);
     let groups = ((tiles.len() as u32) + columns - 1) / columns;
     let rows = groups * 2;
     let width = columns * CELL_SIZE + (columns + 1) * PADDING;
     let height = rows * CELL_SIZE + (rows + 1) * PADDING;
-    let mut sheet = RgbaImage::from_pixel(width, height, sheet_pixel());
+    let mut image = RgbaImage::from_pixel(width, height, showcase_background_pixel());
 
     for (index, tile_pair) in tiles.iter().enumerate() {
         let index = index as u32;
@@ -318,11 +326,11 @@ fn contact_sheet(tiles: &[TilePair]) -> RgbaImage {
         let rgb = resize(&tile_pair.rgb, CELL_SIZE, CELL_SIZE, FilterType::Lanczos3);
         let depth = resize(&tile_pair.depth, CELL_SIZE, CELL_SIZE, FilterType::Lanczos3);
 
-        overlay(&mut sheet, &rgb, i64::from(x), i64::from(rgb_y));
-        overlay(&mut sheet, &depth, i64::from(x), i64::from(depth_y));
+        overlay(&mut image, &rgb, i64::from(x), i64::from(rgb_y));
+        overlay(&mut image, &depth, i64::from(x), i64::from(depth_y));
     }
 
-    sheet
+    image
 }
 
 fn depth_color(value: f64) -> Rgba<u8> {
@@ -353,6 +361,88 @@ fn background_pixel() -> Rgba<u8> {
     Rgba([244, 246, 249, 255])
 }
 
-fn sheet_pixel() -> Rgba<u8> {
+fn showcase_background_pixel() -> Rgba<u8> {
     Rgba([226, 231, 237, 255])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    const TEST_OUTPUT_DIR: &str = "test_fixtures/test_renders/readme_showcase";
+
+    #[tokio::test]
+    #[ignore = "renders the full README YCB showcase; run for visual proof after render/perf changes"]
+    async fn readme_showcase_generation_produces_visual_artifact() {
+        bevy_sensor::initialize();
+
+        let data_dir = std::env::var_os("BEVY_SENSOR_YCB_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+        let output_dir = PathBuf::from(TEST_OUTPUT_DIR);
+        let output_path = output_dir.join(OUTPUT_FILE);
+        let _ = std::fs::remove_file(&output_path);
+
+        let saved_path = generate_showcase(Options {
+            data_dir,
+            output_dir: output_dir.clone(),
+            objects: None,
+        })
+        .await
+        .expect("README showcase generation failed");
+
+        assert_eq!(saved_path, output_path);
+        assert!(output_path.exists(), "showcase image was not written");
+
+        let image = image::open(&output_path)
+            .expect("generated showcase image should be readable")
+            .to_rgba8();
+        let expected_size = expected_showcase_image_size(DEFAULT_PRESETS.len());
+        assert_eq!(
+            image.dimensions(),
+            expected_size,
+            "README showcase image dimensions changed"
+        );
+        assert_visual_signal(&image);
+
+        let display_path = output_path
+            .canonicalize()
+            .unwrap_or_else(|_| output_path.clone());
+        println!("README showcase visual proof: {}", display_path.display());
+    }
+
+    fn expected_showcase_image_size(tile_count: usize) -> (u32, u32) {
+        let columns = MAX_COLUMNS.min(tile_count.max(1) as u32);
+        let groups = ((tile_count as u32) + columns - 1) / columns;
+        let rows = groups * 2;
+        (
+            columns * CELL_SIZE + (columns + 1) * PADDING,
+            rows * CELL_SIZE + (rows + 1) * PADDING,
+        )
+    }
+
+    fn assert_visual_signal(image: &RgbaImage) {
+        let image_bg = showcase_background_pixel();
+        let tile_bg = background_pixel();
+        let mut non_background_pixels = 0usize;
+        let mut unique_colors = HashSet::new();
+
+        for pixel in image.pixels() {
+            unique_colors.insert(pixel.0);
+            if *pixel != image_bg && *pixel != tile_bg {
+                non_background_pixels += 1;
+            }
+        }
+
+        assert!(
+            non_background_pixels > 10_000,
+            "generated showcase appears blank: only {non_background_pixels} non-background pixels"
+        );
+        assert!(
+            unique_colors.len() > 64,
+            "generated showcase has too little color/depth variation: {} unique colors",
+            unique_colors.len()
+        );
+    }
 }

@@ -1188,9 +1188,9 @@ pub fn render_headless(
     build_headless_app(request, output_clone, shared_rgba, shared_depth).run();
 
     // App::run() returned - check shared_output for result
-    if let Ok(guard) = shared_output.0.lock() {
-        if let Some(output) = guard.as_ref() {
-            return Ok(output.clone());
+    if let Ok(mut guard) = shared_output.0.lock() {
+        if let Some(output) = guard.take() {
+            return Ok(output);
         }
     }
 
@@ -1817,13 +1817,13 @@ fn check_screenshot_ready(
     state.frame_count += 1;
 
     // Check if RGBA callback has written data
-    let rgba_ready = if let Ok(guard) = shared_image.0.lock() {
-        if let Some((rgba_data, width, height)) = guard.as_ref() {
-            if state.rgba_data.is_none() {
-                state.rgba_data = Some(rgba_data.clone());
-                state.image_width = *width;
-                state.image_height = *height;
-            }
+    let rgba_ready = if state.rgba_data.is_some() {
+        true
+    } else if let Ok(mut guard) = shared_image.0.lock() {
+        if let Some((rgba_data, width, height)) = guard.take() {
+            state.rgba_data = Some(rgba_data);
+            state.image_width = width;
+            state.image_height = height;
             true
         } else {
             false
@@ -1833,11 +1833,11 @@ fn check_screenshot_ready(
     };
 
     // Check if depth readback has completed
-    let depth_ready = if let Ok(guard) = shared_depth.0.lock() {
-        if let Some((depth_data, _width, _height)) = guard.as_ref() {
-            if state.depth_data.is_none() {
-                state.depth_data = Some(depth_data.clone());
-            }
+    let depth_ready = if state.depth_data.is_some() {
+        true
+    } else if let Ok(mut guard) = shared_depth.0.lock() {
+        if let Some((depth_data, _width, _height)) = guard.take() {
+            state.depth_data = Some(depth_data);
             true
         } else {
             false
@@ -1880,7 +1880,24 @@ fn extract_and_exit(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    let Ok(mut guard) = shared_output.0.lock() else {
+        return;
+    };
+
+    if state.rgba_data.is_none() || state.depth_data.is_none() {
+        return;
+    }
+
+    let rgba = state
+        .rgba_data
+        .take()
+        .expect("rgba_data was checked before extraction");
+    let depth = state
+        .depth_data
+        .take()
+        .expect("depth_data was checked before extraction");
+
+    {
         // Use actual captured dimensions (may differ from config if window was resized)
         let width = state.image_width;
         let height = state.image_height;
@@ -1889,8 +1906,8 @@ fn extract_and_exit(
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,
@@ -1898,13 +1915,11 @@ fn extract_and_exit(
             object_rotation: request.object_rotation.clone(),
         };
 
-        if let Ok(mut guard) = shared_output.0.lock() {
-            *guard = Some(output);
-            drop(guard); // Release lock immediately
+        *guard = Some(output);
+        drop(guard); // Release lock immediately
 
-            // Small delay to allow watchdog to detect output before window close
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
+        // Small delay to allow watchdog to detect output before window close
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Close all windows to trigger app exit
         // eprintln!("Closing windows to trigger exit...");
@@ -2132,16 +2147,16 @@ fn check_headless_capture_ready(
     state.frame_count += 1;
 
     // Check if RGBA data is ready
-    let rgba_ready = if let Ok(guard) = shared_rgba.0.lock() {
-        if let Some((rgba_data, width, height)) = guard.as_ref() {
-            if state.rgba_data.is_none() {
-                state.rgba_data = Some(rgba_data.clone());
-                state.image_width = *width;
-                state.image_height = *height;
-                // Disable further captures
-                for mut copier in query.iter_mut() {
-                    copier.enabled = false;
-                }
+    let rgba_ready = if state.rgba_data.is_some() {
+        true
+    } else if let Ok(mut guard) = shared_rgba.0.lock() {
+        if let Some((rgba_data, width, height)) = guard.take() {
+            state.rgba_data = Some(rgba_data);
+            state.image_width = width;
+            state.image_height = height;
+            // Disable further captures
+            for mut copier in query.iter_mut() {
+                copier.enabled = false;
             }
             true
         } else {
@@ -2152,11 +2167,11 @@ fn check_headless_capture_ready(
     };
 
     // Check if depth data is ready
-    let depth_ready = if let Ok(guard) = shared_depth.0.lock() {
-        if let Some((depth_data, _width, _height)) = guard.as_ref() {
-            if state.depth_data.is_none() {
-                state.depth_data = Some(depth_data.clone());
-            }
+    let depth_ready = if state.depth_data.is_some() {
+        true
+    } else if let Ok(mut guard) = shared_depth.0.lock() {
+        if let Some((depth_data, _width, _height)) = guard.take() {
+            state.depth_data = Some(depth_data);
             true
         } else {
             false
@@ -2208,7 +2223,24 @@ fn extract_and_exit_headless(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    let Ok(mut guard) = shared_output.0.lock() else {
+        return;
+    };
+
+    if state.rgba_data.is_none() || state.depth_data.is_none() {
+        return;
+    }
+
+    let rgba = state
+        .rgba_data
+        .take()
+        .expect("rgba_data was checked before extraction");
+    let depth = state
+        .depth_data
+        .take()
+        .expect("depth_data was checked before extraction");
+
+    {
         let width = state.image_width;
         let height = state.image_height;
 
@@ -2216,8 +2248,8 @@ fn extract_and_exit_headless(
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,
@@ -2225,11 +2257,9 @@ fn extract_and_exit_headless(
             object_rotation: request.object_rotation.clone(),
         };
 
-        if let Ok(mut guard) = shared_output.0.lock() {
-            *guard = Some(output);
-            drop(guard);
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
+        *guard = Some(output);
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Send AppExit event (headless apps use this instead of closing windows)
         app_exit.send(bevy::app::AppExit::Success);
@@ -2284,15 +2314,34 @@ fn extract_and_continue_headless_batch(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    if state.rgba_data.is_none() || state.depth_data.is_none() {
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[render_trace][sys] extract_and_continue_headless_batch no_data ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        return;
+    }
+
+    let rgba = state
+        .rgba_data
+        .take()
+        .expect("rgba_data was checked before batch extraction");
+    let depth = state
+        .depth_data
+        .take()
+        .expect("depth_data was checked before batch extraction");
+
+    {
         let width = state.image_width;
         let height = state.image_height;
 
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,
@@ -2349,11 +2398,6 @@ fn extract_and_continue_headless_batch(
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
-    } else if let Some(t0) = t0 {
-        eprintln!(
-            "[render_trace][sys] extract_and_continue_headless_batch no_data ms={:.3}",
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
     }
 }
 

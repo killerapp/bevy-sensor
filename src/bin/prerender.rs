@@ -429,11 +429,14 @@ fn ensure_ycb_objects(
     println!("Downloading missing objects...");
 
     let missing_refs: Vec<&str> = missing.iter().map(String::as_str).collect();
-    ycbust::blocking::download_objects_blocking(
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(ycbust::download_objects(
         &missing_refs,
         ycb_dir,
         ycbust::DownloadOptions::default(),
-    )?;
+    ))?;
 
     let still_missing = ycb::missing_objects(ycb_dir, object_ids);
     if !still_missing.is_empty() {

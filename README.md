@@ -29,6 +29,16 @@ Regenerate it locally:
 cargo run --example readme_showcase --release -- --data-dir /tmp/ycb --output-dir docs/images
 ```
 
+For a render/performance proof run that writes a fresh visual artifact without
+changing the README image, use:
+
+```bash
+just test-readme-showcase
+```
+
+The proof image is written to
+`test_fixtures/test_renders/readme_showcase/ycb_rgbd_showcase.png`.
+
 Any object with the standard YCB/ycbust layout can be rendered the same way:
 `<object_id>/google_16k/textured.obj` plus `texture_map.png`. Use
 `RenderConfig::preview()` for README-quality visuals, or

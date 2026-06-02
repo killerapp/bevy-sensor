@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(render)* add an opt-in README showcase image proof test for render/performance work
+
+### Changed
+
+- *(ycb)* align with ycbust 0.5's async downloader and retain `ycbust-s3` as a no-op compatibility feature
+
+### Performance
+
+- *(render)* move completed RGBA/depth capture buffers into render outputs instead of cloning them
+
 ## [0.5.5](https://github.com/killerapp/bevy-sensor/compare/v0.5.4...v0.5.5) - 2026-06-01
 
 ### Other
