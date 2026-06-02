@@ -29,18 +29,17 @@ bevy = { version = "0.15.3", default-features = false, features = [
     "zstd",            # Compression for ktx2
 ] }
 bevy_obj = { version = "0.15", features = ["scene"] }
-ycbust = { version = "0.4.1", features = ["blocking"] }
+ycbust = "0.5"
 image = "0.25"  # For saving PNG/depth images
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-reqwest = "0.11"
 
 [features]
 default = []
-# Enable ycbust's S3 streaming support for integration tests that exercise
-# the upstream `ycbust::s3` surface. Not used by runtime code.
-ycbust-s3 = ["ycbust/s3"]
+# Retained for downstream feature compatibility. ycbust 0.5 removed its
+# optional S3 streaming surface, so this feature is now a no-op.
+ycbust-s3 = []
 
 [dev-dependencies]
 tempfile = "3.10"
