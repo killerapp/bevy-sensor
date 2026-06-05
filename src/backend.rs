@@ -302,7 +302,11 @@ mod tests {
         let config = BackendConfig::wsl2();
         let backends = config.backends_to_try();
         assert!(!backends.is_empty());
-        assert_eq!(backends[0], RenderBackend::WebGPU);
+        let expected_first = std::env::var("WGPU_BACKEND")
+            .ok()
+            .and_then(|backend| parse_backend(&backend))
+            .unwrap_or(RenderBackend::WebGPU);
+        assert_eq!(backends[0], expected_first);
     }
 
     #[test]

@@ -56,6 +56,15 @@ test-lib:
 test-render-integration:
     cargo test -- --ignored --test render_integration -- --nocapture
 
+# Generate the README showcase image as visual proof (hardware test - uses GPU)
+test-readme-showcase:
+    cargo test --example readme_showcase readme_showcase_generation_produces_visual_artifact -- --ignored --nocapture
+
+# Full local proof pass for render/performance work
+full-test: test
+    cargo test --test render_integration test_batch_render_matches_sequential_episode_outputs -- --ignored --nocapture
+    cargo test --example readme_showcase readme_showcase_generation_produces_visual_artifact -- --ignored --nocapture
+
 # Run integration tests with WebGPU backend explicitly
 test-render-webgpu:
     WGPU_BACKEND=webgpu cargo test -- --ignored --test render_integration -- --nocapture

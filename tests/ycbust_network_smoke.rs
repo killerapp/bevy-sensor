@@ -8,8 +8,7 @@
 //!   cargo test --test ycbust_network_smoke -- --ignored --nocapture
 //!
 //! What this guards:
-//! - `ycbust::blocking::download_ycb_blocking` actually completes end-to-end
-//!   (the path `prerender` binary now takes after the v0.4.x migration).
+//! - `ycbust::download_ycb` actually completes end-to-end.
 //! - `DownloadOptions::concurrency > 1` is faster than serial on a cold cache.
 //! - Extracted mesh layout still matches the contract (`GOOGLE_16K_*` consts).
 //!
@@ -18,8 +17,8 @@
 
 use std::time::Instant;
 use ycbust::{
-    blocking::download_ycb_blocking, object_mesh_path, object_texture_path, DownloadOptions,
-    Subset, REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
+    download_ycb, object_mesh_path, object_texture_path, DownloadOptions, Subset,
+    REPRESENTATIVE_OBJECTS, TBP_STANDARD_OBJECTS,
 };
 
 fn silent_options(concurrency: usize) -> DownloadOptions {
@@ -39,15 +38,15 @@ fn assert_subset_present<P: AsRef<std::path::Path>>(dir: P, ids: &[&str]) {
     }
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "hits real network; run with --ignored --nocapture"]
-fn ycbust_network_smoke_blocking_download_representative() {
-    // The exact path `prerender` takes post-migration: blocking wrapper +
-    // default options. Cold cache, no-op second call.
+async fn ycbust_network_smoke_download_representative() {
+    // Cold cache, no-op second call.
     let dir = tempfile::tempdir().expect("tempdir");
 
     let start = Instant::now();
-    download_ycb_blocking(Subset::Representative, dir.path(), silent_options(1))
+    download_ycb(Subset::Representative, dir.path(), silent_options(1))
+        .await
         .expect("initial download failed");
     let first = start.elapsed();
 
@@ -57,7 +56,8 @@ fn ycbust_network_smoke_blocking_download_representative() {
     // Second call should short-circuit on extracted-mesh detection — no
     // re-download. This validates the resume path we rely on.
     let start = Instant::now();
-    download_ycb_blocking(Subset::Representative, dir.path(), silent_options(1))
+    download_ycb(Subset::Representative, dir.path(), silent_options(1))
+        .await
         .expect("warm download failed");
     let warm = start.elapsed();
     println!("representative warm resume (concurrency=1): {warm:?}");
@@ -70,9 +70,9 @@ fn ycbust_network_smoke_blocking_download_representative() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "hits real network; downloads ~10 YCB archives; run with --ignored --nocapture"]
-fn ycbust_network_smoke_parallel_beats_serial_tbp_standard() {
+async fn ycbust_network_smoke_parallel_beats_serial_tbp_standard() {
     // TBP standard = 10 objects, enough work that parallel concurrency
     // should visibly win over serial. Each subset into its own tempdir
     // so neither run benefits from the other's cache.
@@ -80,13 +80,15 @@ fn ycbust_network_smoke_parallel_beats_serial_tbp_standard() {
     let parallel_dir = tempfile::tempdir().expect("tempdir parallel");
 
     let start = Instant::now();
-    download_ycb_blocking(Subset::TbpStandard, serial_dir.path(), silent_options(1))
+    download_ycb(Subset::TbpStandard, serial_dir.path(), silent_options(1))
+        .await
         .expect("serial download failed");
     let serial = start.elapsed();
     assert_subset_present(serial_dir.path(), TBP_STANDARD_OBJECTS);
 
     let start = Instant::now();
-    download_ycb_blocking(Subset::TbpStandard, parallel_dir.path(), silent_options(4))
+    download_ycb(Subset::TbpStandard, parallel_dir.path(), silent_options(4))
+        .await
         .expect("parallel download failed");
     let parallel = start.elapsed();
     assert_subset_present(parallel_dir.path(), TBP_STANDARD_OBJECTS);

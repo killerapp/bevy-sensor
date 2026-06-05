@@ -13,8 +13,8 @@
 //!   runs the whole suite.
 //! - Pin format / layout / enum shape. Do NOT pin implementation behavior
 //!   (e.g. download ordering) — that's upstream's business.
-//! - Live network coverage lives in `ycbust_s3_integration.rs` behind the
-//!   `ycbust-s3` feature, `#[ignore]`d by default.
+//! - Live network coverage lives in `ycbust_network_smoke.rs`, `#[ignore]`d
+//!   by default.
 
 use std::path::Path;
 use ycbust::{
@@ -278,7 +278,7 @@ fn ycbust_contract_google_16k_consts_compose_with_object_dir() {
 }
 
 // -----------------------------------------------------------------------------
-// YcbError (v0.4.0) — bevy-sensor maps these into `RenderError` in follow-up
+// YcbError (v0.4+) — bevy-sensor maps these into `RenderError` in follow-up
 // work. Pinning the match shape here means a future variant rename or removal
 // fails in this suite before it reaches the mapping code.
 // -----------------------------------------------------------------------------
@@ -295,10 +295,8 @@ fn ycbust_contract_error_variants_matchable() {
             YcbError::HttpStatus { .. } => "http_status",
             YcbError::Extraction { .. } => "extraction",
             YcbError::Io(_) => "io",
-            YcbError::Integrity { .. } => "integrity",
             YcbError::InvalidResponse(_) => "invalid_response",
             YcbError::UnsafeArchive(_) => "unsafe_archive",
-            YcbError::Other(_) => "other",
             _ => "unknown_non_exhaustive",
         }
     }
@@ -308,11 +306,8 @@ fn ycbust_contract_error_variants_matchable() {
     };
     assert_eq!(classify(http), "http_status");
 
-    let integrity = YcbError::Integrity {
-        path: "/tmp/foo.tgz".into(),
-        reason: "expected 1024, got 512".into(),
-    };
-    assert_eq!(classify(integrity), "integrity");
+    let unsafe_archive = YcbError::UnsafeArchive("../escape".into());
+    assert_eq!(classify(unsafe_archive), "unsafe_archive");
 }
 
 #[test]
@@ -333,26 +328,14 @@ fn ycbust_contract_result_alias_present() {
 }
 
 // -----------------------------------------------------------------------------
-// Blocking wrappers (v0.4.0, `blocking` feature) — bevy-sensor's `prerender`
-// binary uses these to avoid spinning up a throwaway Tokio runtime. They're
-// part of this crate's hard dependency surface now.
+// Async download no-op behavior — bevy-sensor's sync prerender binary wraps
+// this with a tiny current-thread Tokio runtime.
 // -----------------------------------------------------------------------------
 
-#[test]
-fn ycbust_contract_blocking_wrappers_present() {
-    // Compile-check: both wrappers exist with the expected signatures.
-    let _f1: fn(Subset, &Path, DownloadOptions) -> ycbust::Result<()> =
-        ycbust::blocking::download_ycb_blocking;
-    let _f2: fn(&[&str], &Path, DownloadOptions) -> ycbust::Result<()> =
-        ycbust::blocking::download_objects_blocking;
-}
-
-#[test]
-fn ycbust_contract_blocking_download_objects_empty_slice_is_noop() {
-    // Empty slice should no-op without hitting the network. Also exercises
-    // the runtime-construction path in the blocking wrapper.
+#[tokio::test]
+async fn ycbust_contract_download_objects_empty_slice_is_noop() {
+    // Empty slice should no-op without hitting the network.
     let dir = tempfile::tempdir().expect("tempdir");
-    let result =
-        ycbust::blocking::download_objects_blocking(&[], dir.path(), DownloadOptions::default());
+    let result = ycbust::download_objects(&[], dir.path(), DownloadOptions::default()).await;
     assert!(result.is_ok());
 }
