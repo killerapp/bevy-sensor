@@ -22,7 +22,8 @@
 
 use bevy_sensor::{
     batch::BatchRenderRequest, generate_viewpoints, render_to_buffer, BatchRenderConfig,
-    ObjectRotation, PersistentRenderer, RenderConfig, RenderSession, ViewpointConfig,
+    ObjectRotation, PersistentRenderer, RenderConfig, RenderSession, TargetingPolicy, Vec3,
+    ViewpointConfig,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -108,6 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             viewpoint: vp,
             object_rotation: rotation.clone(),
             render_config: render_config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         }])?;
     }
     let session_per_call = t1.elapsed();

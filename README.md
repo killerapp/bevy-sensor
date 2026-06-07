@@ -78,6 +78,24 @@ Render specific objects:
 just render-batch "003_cracker_box,005_tomato_soup_can"
 ```
 
+Validate center foreground hits before a longer NeoCortx parity run:
+```bash
+cargo run --bin prerender -- \
+  --validate-center-hit \
+  --data-dir /tmp/ycb \
+  --objects "033_spatula,057_racquetball,063-b_marbles,065-e_cups,073-f_lego_duplo" \
+  --target mesh-center \
+  --rotation-schedule tbp-parity \
+  --validation-report target/center_hit_validation_timeout_objects.json
+```
+
+The validation command exits non-zero when any object rotation has zero center-foreground hits.
+Batch prerenders also accept `--target mesh-center` and write the targeting policy,
+mesh bounds, target point, camera pose, and render-health summary into the generated
+manifest/index JSON. Live `RenderOutput` and `BatchRenderOutput` values also carry
+`target_point` and `targeting_policy`, so consumers do not need to recompute the
+rotated mesh-center pivot from manifest metadata.
+
 ### Library (Rust)
 
 Add to your `Cargo.toml`:
@@ -102,6 +120,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = render_to_buffer(object_path, &viewpoint, &rotation, &config)?;
     
     println!("Captured {}x{} image", output.width, output.height);
+    Ok(())
+}
+```
+
+For YCB parity runs where the mesh's visual center is not the source origin,
+generate the same TBP orbit around the rotated mesh AABB center:
+
+```rust
+use bevy_sensor::{
+    generate_targeted_viewpoints, render_to_buffer_with_target, ObjectRotation, RenderConfig,
+    TargetingPolicy, ViewpointConfig,
+};
+use std::path::Path;
+
+fn render_centered() -> Result<(), Box<dyn std::error::Error>> {
+    let object_path = Path::new("/tmp/ycb/033_spatula");
+    let config = RenderConfig::tbp_default();
+    let rotation = ObjectRotation::new(0.0, 90.0, 0.0);
+    let targeted = generate_targeted_viewpoints(
+        object_path,
+        &ViewpointConfig::default(),
+        &rotation,
+        &TargetingPolicy::MeshCenter,
+    )?;
+    let output = render_to_buffer_with_target(
+        object_path,
+        &targeted.viewpoints[0],
+        &rotation,
+        &config,
+        targeted.target_point,
+        targeted.policy.clone(),
+    )?;
+
+    let health = output.health();
+    let surface_point = output.center_surface_point_world();
+    println!(
+        "{:?} {:?} {:?}",
+        output.target_point, health.center_foreground, surface_point
+    );
     Ok(())
 }
 ```

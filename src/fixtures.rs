@@ -16,7 +16,7 @@
 //! let depth_image = render.to_depth_image();
 //! ```
 
-use crate::{CameraIntrinsics, RenderOutput};
+use crate::{CameraIntrinsics, MeshBoundsMetadata, RenderHealth, RenderOutput, TargetingPolicy};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -80,11 +80,21 @@ impl From<serde_json::Error> for FixtureError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetMetadata {
     pub version: String,
+    #[serde(default)]
+    pub crate_version: Option<String>,
+    #[serde(default)]
+    pub renderer_policy_version: Option<String>,
     pub objects: Vec<String>,
     pub viewpoints_per_rotation: usize,
     pub rotations_per_object: usize,
     pub renders_per_object: usize,
     pub resolution: [u32; 2],
+    #[serde(default)]
+    pub resolution_width: Option<u32>,
+    #[serde(default)]
+    pub resolution_height: Option<u32>,
+    #[serde(default)]
+    pub targeting_policy: Option<TargetingPolicy>,
     pub intrinsics: IntrinsicsMetadata,
     pub viewpoint_config: ViewpointConfigMetadata,
     pub rotations: Vec<[f32; 3]>,
@@ -112,6 +122,16 @@ pub struct RenderMetadata {
     pub viewpoint_index: usize,
     pub rotation_euler: [f32; 3],
     pub camera_position: [f32; 3],
+    #[serde(default)]
+    pub camera_rotation_xyzw: Option<[f32; 4]>,
+    #[serde(default)]
+    pub target_point: Option<[f32; 3]>,
+    #[serde(default)]
+    pub targeting_policy: Option<TargetingPolicy>,
+    #[serde(default)]
+    pub mesh_bounds: Option<MeshBoundsMetadata>,
+    #[serde(default)]
+    pub health: Option<RenderHealth>,
     pub rgba_file: String,
     pub depth_file: String,
 }
@@ -253,10 +273,28 @@ impl TestFixtures {
             (self.metadata.resolution[0] as usize) * (self.metadata.resolution[1] as usize);
         let depth = load_depth_binary(&depth_path, expected_depth_values)?;
 
-        // Build camera transform from position (looking at origin)
+        // Build camera transform from position. New manifests carry the exact
+        // render rotation; older manifests only recorded origin-targeted
+        // camera positions, so reconstruct with a target fallback.
         let pos = render_meta.camera_position;
-        let camera_transform =
-            Transform::from_xyz(pos[0], pos[1], pos[2]).looking_at(Vec3::ZERO, Vec3::Y);
+        let translation = Vec3::new(pos[0], pos[1], pos[2]);
+        let camera_transform = if let Some(q) = render_meta.camera_rotation_xyzw {
+            Transform {
+                translation,
+                rotation: Quat::from_xyzw(q[0], q[1], q[2], q[3]),
+                ..Default::default()
+            }
+        } else {
+            let target = render_meta.target_point.unwrap_or([0.0, 0.0, 0.0]);
+            Transform::from_translation(translation)
+                .looking_at(Vec3::new(target[0], target[1], target[2]), Vec3::Y)
+        };
+        let target_point = Vec3::from_array(render_meta.target_point.unwrap_or([0.0, 0.0, 0.0]));
+        let targeting_policy = render_meta
+            .targeting_policy
+            .clone()
+            .or_else(|| self.metadata.targeting_policy.clone())
+            .unwrap_or(TargetingPolicy::Origin);
 
         // Build object rotation (convert from f32 metadata to f64)
         let rot = render_meta.rotation_euler;
@@ -271,6 +309,8 @@ impl TestFixtures {
             intrinsics: self.intrinsics(),
             camera_transform,
             object_rotation,
+            target_point,
+            targeting_policy,
         })
     }
 
@@ -402,11 +442,16 @@ mod tests {
         // Create minimal metadata
         let metadata = DatasetMetadata {
             version: "1.0".to_string(),
+            crate_version: None,
+            renderer_policy_version: None,
             objects: vec!["test_object".to_string()],
             viewpoints_per_rotation: 24,
             rotations_per_object: 3,
             renders_per_object: 72,
             resolution: [64, 64],
+            resolution_width: None,
+            resolution_height: None,
+            targeting_policy: None,
             intrinsics: IntrinsicsMetadata {
                 focal_length: [55.4, 55.4],
                 principal_point: [32.0, 32.0],
@@ -478,11 +523,16 @@ mod tests {
     fn test_metadata_serialization_roundtrip() {
         let metadata = DatasetMetadata {
             version: "1.0".to_string(),
+            crate_version: Some("0.5.5".to_string()),
+            renderer_policy_version: Some(crate::RENDERER_POLICY_VERSION.to_string()),
             objects: vec!["obj1".to_string(), "obj2".to_string()],
             viewpoints_per_rotation: 24,
             rotations_per_object: 3,
             renders_per_object: 72,
             resolution: [64, 64],
+            resolution_width: Some(64),
+            resolution_height: Some(64),
+            targeting_policy: Some(TargetingPolicy::MeshCenter),
             intrinsics: IntrinsicsMetadata {
                 focal_length: [55.4, 55.4],
                 principal_point: [32.0, 32.0],
@@ -512,6 +562,21 @@ mod tests {
             viewpoint_index: 5,
             rotation_euler: [0.0, 90.0, 0.0],
             camera_position: [0.5, 0.0, 0.0],
+            camera_rotation_xyzw: Some([0.0, 0.0, 0.0, 1.0]),
+            target_point: Some([0.0, 0.0, 0.0]),
+            targeting_policy: Some(TargetingPolicy::Origin),
+            mesh_bounds: None,
+            health: Some(RenderHealth {
+                center_pixel: Some([32, 32]),
+                center_depth: Some(0.25),
+                center_foreground: true,
+                foreground_pixel_count: 1,
+                foreground_coverage: 1.0 / 4096.0,
+                center_5x5_foreground_count: 1,
+                nearest_foreground_pixel: Some([32, 32]),
+                nearest_foreground_depth: Some(0.25),
+                nearest_foreground_distance_px: Some(0.0),
+            }),
             rgba_file: "r1_v05.png".to_string(),
             depth_file: "r1_v05.depth".to_string(),
         };

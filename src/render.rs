@@ -70,7 +70,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::{backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput};
+use crate::{
+    backend::BackendConfig, ObjectRotation, RenderConfig, RenderError, RenderOutput,
+    TargetingPolicy,
+};
 use ycbust::{GOOGLE_16K_MESH_RELATIVE, GOOGLE_16K_TEXTURE_RELATIVE};
 
 /// Watchdog timeout for a single render, in seconds.
@@ -1553,6 +1556,8 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
             scale: Vec3::ONE,
         },
         object_rotation: ObjectRotation { pitch, yaw, roll },
+        target_point: Vec3::ZERO,
+        targeting_policy: TargetingPolicy::Origin,
     })
 }
 
@@ -1896,6 +1901,8 @@ fn extract_and_exit(
             intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         if let Ok(mut guard) = shared_output.0.lock() {
@@ -2223,6 +2230,8 @@ fn extract_and_exit_headless(
             intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         if let Ok(mut guard) = shared_output.0.lock() {
@@ -2300,6 +2309,8 @@ fn extract_and_continue_headless_batch(
                 .current_viewpoint()
                 .unwrap_or(request.camera_transform),
             object_rotation: request.object_rotation.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
         batch.outputs.push(output);
 
@@ -3210,7 +3221,8 @@ fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
 mod smoke_tests {
     use super::{headless_scene_setup_count, reset_headless_scene_setup_count};
     use crate::{
-        BatchRenderConfig, BatchRenderRequest, ObjectRotation, RenderConfig, ViewpointConfig,
+        BatchRenderConfig, BatchRenderRequest, ObjectRotation, RenderConfig, TargetingPolicy, Vec3,
+        ViewpointConfig,
     };
     use image::{ImageBuffer, Rgba};
     use tempfile::TempDir;
@@ -3284,6 +3296,8 @@ f 5/1 2/3 1/4
                 viewpoint,
                 object_rotation: ObjectRotation::identity(),
                 render_config: config.clone(),
+                target_point: Vec3::ZERO,
+                targeting_policy: TargetingPolicy::Origin,
             })
             .collect();
 

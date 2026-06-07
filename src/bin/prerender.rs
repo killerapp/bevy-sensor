@@ -4,10 +4,13 @@
 //! The output can be committed to the repository for CI/CD testing.
 //!
 //! Usage:
-//!   cargo run --bin prerender -- [--output-dir <path>] [--objects <obj1,obj2>]
+//!   cargo run --bin prerender -- [--output-dir <path>] [--objects <obj1,obj2>] [--target origin|mesh-center]
+//!   cargo run --bin prerender -- --validate-center-hit --objects <obj1,obj2> --target mesh-center
 //!
 //! Default output: test_fixtures/renders/
 //! Default objects: 003_cracker_box, 005_tomato_soup_can
+//! Default batch target: origin
+//! Default validation target: mesh-center
 //!
 //! For single-render mode:
 //!   cargo run --bin prerender -- --single-render --object <name> --rotation <idx> --viewpoint <idx> --output <dir>
@@ -15,8 +18,9 @@
 use bevy_sensor::ycb;
 use bevy_sensor::ycbust;
 use bevy_sensor::{
-    generate_viewpoints, render_batch, BatchRenderConfig, BatchRenderOutput, BatchRenderRequest,
-    ObjectRotation, RenderConfig, RenderStatus, ViewpointConfig,
+    generate_targeted_viewpoints, render_batch, validate_center_hits, BatchRenderConfig,
+    BatchRenderOutput, BatchRenderRequest, MeshBoundsMetadata, ObjectRotation, RenderConfig,
+    RenderHealth, RenderStatus, TargetingPolicy, ViewpointConfig, RENDERER_POLICY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,6 +32,10 @@ use std::path::{Path, PathBuf};
 pub struct DatasetMetadata {
     /// Version of the dataset format
     pub version: String,
+    /// bevy-sensor crate version that generated the dataset
+    pub crate_version: String,
+    /// Renderer/targeting-policy version
+    pub renderer_policy_version: String,
     /// Objects included in this dataset
     pub objects: Vec<String>,
     /// Number of viewpoints per rotation
@@ -38,6 +46,12 @@ pub struct DatasetMetadata {
     pub renders_per_object: usize,
     /// Image resolution
     pub resolution: [u32; 2],
+    /// Named image width for manifest consumers
+    pub resolution_width: u32,
+    /// Named image height for manifest consumers
+    pub resolution_height: u32,
+    /// Targeting policy used for viewpoint generation
+    pub targeting_policy: TargetingPolicy,
     /// Camera intrinsics
     pub intrinsics: IntrinsicsMetadata,
     /// Viewpoint configuration
@@ -68,6 +82,11 @@ pub struct RenderMetadata {
     pub viewpoint_index: usize,
     pub rotation_euler: [f32; 3],
     pub camera_position: [f32; 3],
+    pub camera_rotation_xyzw: [f32; 4],
+    pub target_point: [f32; 3],
+    pub targeting_policy: TargetingPolicy,
+    pub mesh_bounds: Option<MeshBoundsMetadata>,
+    pub health: RenderHealth,
     pub rgba_file: String,
     pub depth_file: String,
 }
@@ -86,6 +105,11 @@ fn main() {
     // Keep single-render mode available for scripts that render one capture.
     if args.iter().any(|a| a == "--single-render") {
         run_single_render(&args);
+        return;
+    }
+
+    if args.iter().any(|a| a == "--validate-center-hit") {
+        run_center_hit_validation(&args);
         return;
     }
 
@@ -115,6 +139,7 @@ fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let output_dir =
         parse_arg(args, "--output").unwrap_or_else(|| "test_fixtures/renders".to_string());
     let data_dir_str = parse_arg(args, "--data-dir").unwrap_or_else(|| "/tmp/ycb".to_string());
+    let target_policy = parse_target_policy(args, "origin")?;
 
     let ycb_dir = PathBuf::from(&data_dir_str);
 
@@ -126,11 +151,18 @@ fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let render_config = RenderConfig::tbp_default();
     let viewpoint_config = ViewpointConfig::default();
-    let rotations = ObjectRotation::tbp_benchmark_rotations();
-    let viewpoints = generate_viewpoints(&viewpoint_config);
+    let rotations = rotations_from_args(args)?;
 
     let rotation = &rotations[rotation_idx];
-    let viewpoint = &viewpoints[viewpoint_idx];
+    let targeted =
+        generate_targeted_viewpoints(&object_dir, &viewpoint_config, rotation, &target_policy)?;
+    let viewpoint = targeted.viewpoints.get(viewpoint_idx).ok_or_else(|| {
+        format!(
+            "Error: --viewpoint {} out of range for {} generated viewpoints",
+            viewpoint_idx,
+            targeted.viewpoints.len()
+        )
+    })?;
 
     // Create output directory
     let object_output = PathBuf::from(&output_dir).join(&object_id);
@@ -162,6 +194,98 @@ fn run_single_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Run center-hit validation without saving render outputs.
+fn run_center_hit_validation(args: &[String]) {
+    if let Err(e) = run_center_hit_validation_impl(args) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run_center_hit_validation_impl(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir_str = parse_arg(args, "--data-dir").unwrap_or_else(|| "/tmp/ycb".to_string());
+    let objects_arg = parse_arg(args, "--objects");
+    let target_policy = parse_target_policy(args, "mesh-center")?;
+    let rotations = rotations_from_args(args)?;
+
+    let objects: Vec<String> = if let Some(objs) = objects_arg {
+        objs.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else {
+        CI_TEST_OBJECTS.iter().map(|s| s.to_string()).collect()
+    };
+
+    println!("=== bevy-sensor Center-Hit Validation ===");
+    println!("Data directory: {}", data_dir_str);
+    println!("Objects: {:?}", objects);
+    println!("Targeting: {}", target_policy.label());
+    println!("Rotations: {}", rotations.len());
+
+    let ycb_dir = PathBuf::from(&data_dir_str);
+    let object_refs: Vec<&str> = objects.iter().map(String::as_str).collect();
+    ensure_ycb_objects(&ycb_dir, &object_refs)?;
+    let ycb_dir = fs::canonicalize(&ycb_dir).unwrap_or(ycb_dir);
+
+    let render_config = RenderConfig::tbp_default();
+    let viewpoint_config = ViewpointConfig::default();
+    let mut reports = Vec::with_capacity(objects.len());
+
+    for object_id in &objects {
+        let object_dir = ycb_dir.join(object_id);
+        println!("\n--- Validating {} ---", object_id);
+        let report = validate_center_hits(
+            object_id.clone(),
+            &object_dir,
+            &viewpoint_config,
+            &rotations,
+            &render_config,
+            &target_policy,
+        )?;
+
+        for rotation in &report.rotations {
+            println!(
+                "  rotation {} {:?}: {}/{} center hits",
+                rotation.rotation_index,
+                rotation.rotation_euler,
+                rotation.center_hits,
+                rotation.total_viewpoints
+            );
+        }
+
+        let report_json = serde_json::to_string_pretty(&report)?;
+        println!("{}", report_json);
+
+        if !report.is_valid() {
+            return Err(format!(
+                "{} failed center-hit validation for rotations {:?}",
+                object_id,
+                report.zero_hit_rotations()
+            )
+            .into());
+        }
+
+        reports.push(report);
+    }
+
+    if let Some(report_path) = parse_arg(args, "--validation-report") {
+        let report_path = PathBuf::from(report_path);
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&report_path, serde_json::to_string_pretty(&reports)?)?;
+        println!("\nSaved validation report to {}", report_path.display());
+    }
+
+    println!(
+        "\nCenter-hit validation passed for {} objects.",
+        reports.len()
+    );
+    Ok(())
+}
+
 /// Run batch rendering (main mode)
 fn run_batch_render(args: &[String]) {
     if let Err(e) = run_batch_render_impl(args) {
@@ -175,9 +299,15 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         parse_arg(args, "--output-dir").unwrap_or_else(|| "test_fixtures/renders".to_string());
     let data_dir_str = parse_arg(args, "--data-dir").unwrap_or_else(|| "/tmp/ycb".to_string());
     let objects_arg = parse_arg(args, "--objects");
+    let target_policy = parse_target_policy(args, "origin")?;
+    let rotations = rotations_from_args(args)?;
 
     let objects: Vec<String> = if let Some(objs) = objects_arg {
-        objs.split(',').map(|s| s.trim().to_string()).collect()
+        objs.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
     } else {
         CI_TEST_OBJECTS.iter().map(|s| s.to_string()).collect()
     };
@@ -186,6 +316,7 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Output directory: {}", output_dir);
     println!("Data directory: {}", data_dir_str);
     println!("Objects: {:?}", objects);
+    println!("Targeting: {}", target_policy.label());
 
     let ycb_dir = PathBuf::from(&data_dir_str);
     let object_refs: Vec<&str> = objects.iter().map(String::as_str).collect();
@@ -208,30 +339,34 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // Configuration
     let render_config = RenderConfig::tbp_default();
     let viewpoint_config = ViewpointConfig::default();
-    let rotations = ObjectRotation::tbp_benchmark_rotations();
-    let viewpoints = generate_viewpoints(&viewpoint_config);
+    let viewpoints_per_rotation = viewpoint_config.viewpoint_count();
 
     println!("\nConfiguration:");
     println!(
         "  Resolution: {}x{}",
         render_config.width, render_config.height
     );
-    println!("  Viewpoints: {}", viewpoints.len());
+    println!("  Viewpoints: {}", viewpoints_per_rotation);
     println!("  Rotations: {}", rotations.len());
     println!(
         "  Total renders per object: {}",
-        viewpoints.len() * rotations.len()
+        viewpoints_per_rotation * rotations.len()
     );
 
     // Create dataset metadata
     let intrinsics = render_config.intrinsics();
     let metadata = DatasetMetadata {
-        version: "1.0".to_string(),
+        version: "1.1".to_string(),
+        crate_version: env!("CARGO_PKG_VERSION").to_string(),
+        renderer_policy_version: RENDERER_POLICY_VERSION.to_string(),
         objects: objects.clone(),
-        viewpoints_per_rotation: viewpoints.len(),
+        viewpoints_per_rotation,
         rotations_per_object: rotations.len(),
-        renders_per_object: viewpoints.len() * rotations.len(),
+        renders_per_object: viewpoints_per_rotation * rotations.len(),
         resolution: [render_config.width, render_config.height],
+        resolution_width: render_config.width,
+        resolution_height: render_config.height,
+        targeting_policy: target_policy.clone(),
         intrinsics: IntrinsicsMetadata {
             // Convert f64 intrinsics to f32 for JSON serialization (backward compatible)
             focal_length: [
@@ -297,16 +432,32 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         let mut object_renders: Vec<RenderMetadata> = Vec::new();
         let mut render_count = 0;
-        let total_renders = viewpoints.len() * rotations.len();
+        let total_renders = viewpoints_per_rotation * rotations.len();
 
         for (rot_idx, rotation) in rotations.iter().enumerate() {
-            let requests: Vec<BatchRenderRequest> = viewpoints
+            let targeted = generate_targeted_viewpoints(
+                &object_dir,
+                &viewpoint_config,
+                rotation,
+                &target_policy,
+            )
+            .map_err(|e| {
+                format!(
+                    "Failed to generate targeted viewpoints for {} rotation {}: {}",
+                    object_id, rot_idx, e
+                )
+            })?;
+
+            let requests: Vec<BatchRenderRequest> = targeted
+                .viewpoints
                 .iter()
                 .map(|viewpoint| BatchRenderRequest {
                     object_dir: object_dir.clone(),
                     viewpoint: *viewpoint,
                     object_rotation: rotation.clone(),
                     render_config: render_config.clone(),
+                    target_point: targeted.target_point,
+                    targeting_policy: target_policy.clone(),
                 })
                 .collect();
 
@@ -332,6 +483,7 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 )?;
 
                 let camera_pos = output.request.viewpoint.translation;
+                let camera_rot = output.request.viewpoint.rotation;
                 object_renders.push(RenderMetadata {
                     object_id: object_id.clone(),
                     rotation_index: rot_idx,
@@ -343,6 +495,11 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                         rotation.roll as f32,
                     ],
                     camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
+                    camera_rotation_xyzw: [camera_rot.x, camera_rot.y, camera_rot.z, camera_rot.w],
+                    target_point: output.target_point.to_array(),
+                    targeting_policy: output.targeting_policy.clone(),
+                    mesh_bounds: targeted.mesh_bounds.map(MeshBoundsMetadata::from),
+                    health: output.health.clone(),
                     rgba_file,
                     depth_file,
                 });
@@ -414,6 +571,40 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn parse_target_policy(
+    args: &[String],
+    default: &str,
+) -> Result<TargetingPolicy, Box<dyn std::error::Error>> {
+    let value = parse_arg(args, "--target").unwrap_or_else(|| default.to_string());
+    match value.as_str() {
+        "origin" => Ok(TargetingPolicy::Origin),
+        "mesh-center" | "mesh_center" => Ok(TargetingPolicy::MeshCenter),
+        other => Err(format!(
+            "Invalid --target '{}'. Supported values: origin, mesh-center",
+            other
+        )
+        .into()),
+    }
+}
+
+fn rotations_from_args(args: &[String]) -> Result<Vec<ObjectRotation>, Box<dyn std::error::Error>> {
+    let schedule =
+        parse_arg(args, "--rotation-schedule").unwrap_or_else(|| "tbp-parity".to_string());
+    match schedule.as_str() {
+        "tbp-parity" | "tbp-benchmark" | "benchmark" => {
+            Ok(ObjectRotation::tbp_benchmark_rotations())
+        }
+        "tbp-known" | "tbp-known-orientations" | "known" | "full" => {
+            Ok(ObjectRotation::tbp_known_orientations())
+        }
+        other => Err(format!(
+            "Invalid --rotation-schedule '{}'. Supported values: tbp-parity, tbp-known",
+            other
+        )
+        .into()),
+    }
 }
 
 fn ensure_ycb_objects(
