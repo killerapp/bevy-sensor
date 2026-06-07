@@ -2,8 +2,10 @@
 
 use bevy::asset::LoadState;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::Screenshot;
+use bevy::render::view::Hdr;
 use bevy_obj::ObjPlugin;
 use std::f32::consts::PI;
 
@@ -124,10 +126,8 @@ fn setup(
     // Disable tonemapping for software rendering compatibility
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
         Transform::from_xyz(0.0, 0.3, 0.5).looking_at(Vec3::ZERO, Vec3::Y),
         Tonemapping::None,
     ));
@@ -142,10 +142,11 @@ fn setup(
         Transform::from_xyz(4.0, 8.0, 4.0),
     ));
 
-    // Ambient light
-    commands.insert_resource(AmbientLight {
+    // Ambient light (global resource in Bevy 0.18; `AmbientLight` is now a per-camera component).
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 0.5,
+        ..default()
     });
 
     // Load scene (for geometry) and texture separately
@@ -301,7 +302,9 @@ fn capture_sequence(
                 return;
             }
 
-            let mut transform = camera_query.single_mut();
+            let Ok(mut transform) = camera_query.single_mut() else {
+                return;
+            };
             *transform = viewpoints.0[state.view_index];
             println!("Moved to view {}", state.view_index);
             state.frame_counter = 0;

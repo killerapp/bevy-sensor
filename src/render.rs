@@ -38,28 +38,30 @@
 //! normally exit.
 
 use bevy::app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin};
-use bevy::asset::LoadState;
+use bevy::asset::{LoadState, RenderAssetUsages};
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::query::QueryItem;
+use bevy::light::GlobalAmbientLight;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use bevy::render::camera::{ExtractedCamera, RenderTarget};
-use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
+use bevy::camera::RenderTarget;
+use bevy::render::camera::ExtractedCamera;
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner,
+    Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, ImageCopyBuffer,
-    ImageCopyTexture, ImageDataLayout, MapMode, Origin3d, TextureAspect, TextureDimension,
-    TextureFormat, TextureUsages,
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, Origin3d,
+    TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
+    TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
-use bevy::render::view::ViewDepthTexture;
-use bevy::render::{Extract, Render, RenderApp, RenderSet};
+use bevy::render::view::{Hdr, ViewDepthTexture};
+use bevy::render::{Extract, Render, RenderApp, RenderSystems};
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_obj::ObjPlugin;
 use std::fs::File;
@@ -478,7 +480,7 @@ impl ViewNode for DepthReadbackNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_depth_texture, camera): QueryItem<'w, Self::ViewQuery>,
+        (view_depth_texture, camera): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let trace = render_trace_enabled();
@@ -523,15 +525,15 @@ impl ViewNode for DepthReadbackNode {
         // Copy depth texture to staging buffer
         let encoder = render_context.command_encoder();
         encoder.copy_texture_to_buffer(
-            ImageCopyTexture {
+            TexelCopyTextureInfo {
                 texture: &view_depth_texture.texture,
                 mip_level: 0,
                 origin: Origin3d::ZERO,
                 aspect: TextureAspect::DepthOnly,
             },
-            ImageCopyBuffer {
+            TexelCopyBufferInfo {
                 buffer: &staging_buffer,
-                layout: ImageDataLayout {
+                layout: TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),
@@ -604,7 +606,7 @@ impl Plugin for DepthReadbackPlugin {
         render_app.add_systems(ExtractSchedule, extract_depth_request);
 
         // Add system to process completed depth captures
-        render_app.add_systems(Render, collect_depth_captures.in_set(RenderSet::Cleanup));
+        render_app.add_systems(Render, collect_depth_captures.in_set(RenderSystems::Cleanup));
 
         // Register the depth readback node in the render graph
         // Run after main pass completes (depth buffer is ready) but before tonemapping
@@ -678,7 +680,7 @@ fn collect_depth_captures(
 
         // Poll the device until mapping completes
         loop {
-            render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            let _ = render_device.poll(bevy::render::render_resource::PollType::Poll);
             poll_iters += 1;
             match rx.try_recv() {
                 Ok(Ok(())) => {
@@ -812,8 +814,8 @@ impl Node for ImageCopyDriver {
                 continue;
             };
 
-            let width = gpu_image.size.x;
-            let height = gpu_image.size.y;
+            let width = gpu_image.size.width;
+            let height = gpu_image.size.height;
 
             // Calculate padded bytes per row (wgpu requires 256-byte alignment)
             let block_dimensions = gpu_image.texture_format.block_dimensions();
@@ -846,9 +848,9 @@ impl Node for ImageCopyDriver {
             // Copy texture to buffer
             encoder.copy_texture_to_buffer(
                 gpu_image.texture.as_image_copy(),
-                ImageCopyBuffer {
+                TexelCopyBufferInfo {
                     buffer: &staging_buffer,
-                    layout: ImageDataLayout {
+                    layout: TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(padded_bytes_per_row as u32),
                         rows_per_image: None,
@@ -936,7 +938,7 @@ fn collect_image_captures(
         let timeout = std::time::Duration::from_secs(10);
         let mut poll_iters: u32 = 0;
         loop {
-            render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            let _ = render_device.poll(bevy::render::render_resource::PollType::Poll);
             poll_iters += 1;
 
             if start.elapsed() > timeout {
@@ -1023,7 +1025,7 @@ impl Plugin for ImageCopyPlugin {
         render_app.init_resource::<PendingImageCaptureQueue>();
 
         render_app.add_systems(ExtractSchedule, extract_image_copiers);
-        render_app.add_systems(Render, collect_image_captures.in_set(RenderSet::Cleanup));
+        render_app.add_systems(Render, collect_image_captures.in_set(RenderSystems::Cleanup));
 
         // Add image copy node to render graph (runs after camera driver)
         let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
@@ -1575,10 +1577,8 @@ fn setup_scene(
     let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
         Projection::Perspective(PerspectiveProjection {
             fov,
             near: request.config.near_plane,
@@ -1593,11 +1593,13 @@ fn setup_scene(
         RenderCamera,
     ));
 
-    // Ambient light (from config)
+    // Ambient light (from config). In Bevy 0.18 the global ambient light is the
+    // `GlobalAmbientLight` resource (the `AmbientLight` type became a per-camera component).
     let lighting = &request.config.lighting;
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: lighting.ambient_brightness,
+        ..default()
     });
 
     // Key light (from config) - Bevy 0.15+ uses PointLight component directly
@@ -1784,7 +1786,7 @@ fn request_screenshot(
     // Spawn Screenshot entity with observer (Bevy 0.15+ API)
     println!("Requesting screenshot via Screenshot entity");
     commands.spawn(Screenshot::primary_window()).observe(
-        move |trigger: Trigger<ScreenshotCaptured>| {
+        move |trigger: On<ScreenshotCaptured>| {
             // ScreenshotCaptured derefs to Image
             let image: &Image = trigger.event();
 
@@ -1792,8 +1794,10 @@ fn request_screenshot(
             let width = image.texture_descriptor.size.width;
             let height = image.texture_descriptor.size.height;
 
-            // Get raw image data - Bevy 0.15 Image.data is Vec<u8>
-            let rgba_data = image.data.clone();
+            // Bevy 0.18: Image.data is now Option<Vec<u8>>; skip if absent.
+            let Some(rgba_data) = image.data.clone() else {
+                return;
+            };
 
             // Store in shared buffer
             if let Ok(mut guard) = image_buffer.lock() {
@@ -1971,11 +1975,11 @@ fn setup_headless_scene(
     let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            target: RenderTarget::Image(render_target_handle.clone()),
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
+        // In Bevy 0.18 the render target is a separate `RenderTarget` component,
+        // and `RenderTarget::Image` wraps an `ImageRenderTarget` (via `From<Handle<Image>>`).
+        RenderTarget::Image(render_target_handle.clone().into()),
         Projection::Perspective(PerspectiveProjection {
             fov,
             near: request.config.near_plane,
@@ -1995,11 +1999,12 @@ fn setup_headless_scene(
         },
     ));
 
-    // Ambient light
+    // Ambient light (global resource in Bevy 0.18).
     let lighting = &request.config.lighting;
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: lighting.ambient_brightness,
+        ..default()
     });
 
     // Key light
@@ -2200,7 +2205,7 @@ fn extract_and_exit_headless(
     mut state: ResMut<RenderState>,
     request: Res<RenderRequest>,
     shared_output: Res<SharedOutput>,
-    mut app_exit: EventWriter<bevy::app::AppExit>,
+    mut app_exit: MessageWriter<bevy::app::AppExit>,
     batch: Option<Res<HeadlessBatchSequence>>,
 ) {
     if batch.is_some() {
@@ -2241,7 +2246,7 @@ fn extract_and_exit_headless(
         }
 
         // Send AppExit event (headless apps use this instead of closing windows)
-        app_exit.send(bevy::app::AppExit::Success);
+        app_exit.write(bevy::app::AppExit::Success);
         state.exit_requested = true;
     }
 }
@@ -2418,11 +2423,9 @@ fn setup_session_persistent_scene(
     let fov = config.0.fov_radians();
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            target: RenderTarget::Image(render_target_handle.clone()),
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
+        RenderTarget::Image(render_target_handle.clone().into()),
         Projection::Perspective(PerspectiveProjection {
             fov,
             near: config.0.near_plane,
@@ -2442,9 +2445,10 @@ fn setup_session_persistent_scene(
     ));
 
     let lighting = &config.0.lighting;
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: lighting.ambient_brightness,
+        ..default()
     });
 
     if lighting.key_light_intensity > 0.0 {
@@ -2665,7 +2669,7 @@ impl RenderSession {
                 .iter(world)
                 .collect();
             for entity in stale {
-                world.entity_mut(entity).despawn_recursive();
+                world.entity_mut(entity).despawn();
             }
 
             // Clear shared RGBA/depth buffers so a stale payload can't leak
