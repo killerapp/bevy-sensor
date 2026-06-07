@@ -301,7 +301,7 @@ fn depth_tile(depth: &[f64], width: u32, height: u32, far_plane: f32) -> RgbaIma
 
 fn contact_sheet(tiles: &[TilePair]) -> RgbaImage {
     let columns = MAX_COLUMNS.min(tiles.len().max(1) as u32);
-    let groups = ((tiles.len() as u32) + columns - 1) / columns;
+    let groups = (tiles.len() as u32).div_ceil(columns);
     let rows = groups * 2;
     let width = columns * CELL_SIZE + (columns + 1) * PADDING;
     let height = rows * CELL_SIZE + (rows + 1) * PADDING;
