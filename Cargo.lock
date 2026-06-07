@@ -629,7 +629,6 @@ dependencies = [
  "bevy_obj",
  "image",
  "pollster",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
