@@ -633,6 +633,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tobj",
  "tokio",
  "wgpu 24.0.5",
  "ycbust",
