@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/killerapp/bevy-sensor/compare/v0.5.5...v0.6.0) - 2026-06-07
+
+### Added
+
+- add TBP surface targeting and render health APIs
+
+### Other
+
+- Add YCB README showcase and CI path filters [skip ci]
+- Add YCB README showcase and CI path filters
+
 ## [0.5.5](https://github.com/killerapp/bevy-sensor/compare/v0.5.4...v0.5.5) - 2026-06-01
 
 ### Other
