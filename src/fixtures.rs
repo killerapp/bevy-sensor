@@ -289,6 +289,12 @@ impl TestFixtures {
             Transform::from_translation(translation)
                 .looking_at(Vec3::new(target[0], target[1], target[2]), Vec3::Y)
         };
+        let target_point = Vec3::from_array(render_meta.target_point.unwrap_or([0.0, 0.0, 0.0]));
+        let targeting_policy = render_meta
+            .targeting_policy
+            .clone()
+            .or_else(|| self.metadata.targeting_policy.clone())
+            .unwrap_or(TargetingPolicy::Origin);
 
         // Build object rotation (convert from f32 metadata to f64)
         let rot = render_meta.rotation_euler;
@@ -303,6 +309,8 @@ impl TestFixtures {
             intrinsics: self.intrinsics(),
             camera_transform,
             object_rotation,
+            target_point,
+            targeting_policy,
         })
     }
 

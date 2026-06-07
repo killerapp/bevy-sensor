@@ -12,6 +12,7 @@
 //! use bevy_sensor::{
 //!     create_batch_renderer, queue_render_request, render_next_in_batch,
 //!     batch::BatchRenderRequest, BatchRenderConfig, RenderConfig, ObjectRotation,
+//!     TargetingPolicy, Vec3,
 //! };
 //! use std::path::PathBuf;
 //!
@@ -27,6 +28,8 @@
 //!             viewpoint,
 //!             object_rotation: rotation.clone(),
 //!             render_config: RenderConfig::tbp_default(),
+//!             target_point: Vec3::ZERO,
+//!             targeting_policy: TargetingPolicy::Origin,
 //!         })?;
 //!     }
 //! }
@@ -41,8 +44,10 @@
 //! }
 //! ```
 
-use crate::{CameraIntrinsics, ObjectRotation, RenderConfig, RenderHealth, RenderOutput};
-use bevy::prelude::Transform;
+use crate::{
+    CameraIntrinsics, ObjectRotation, RenderConfig, RenderHealth, RenderOutput, TargetingPolicy,
+};
+use bevy::prelude::{Transform, Vec3};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -84,6 +89,10 @@ pub struct BatchRenderRequest {
     pub object_rotation: ObjectRotation,
     /// Render configuration (resolution, lighting, etc.)
     pub render_config: RenderConfig,
+    /// Point the camera was intended to target for this render.
+    pub target_point: Vec3,
+    /// Policy used to derive `target_point`.
+    pub targeting_policy: TargetingPolicy,
 }
 
 /// Status of a single render in a batch.
@@ -112,6 +121,10 @@ pub struct BatchRenderOutput {
     pub height: u32,
     /// Camera intrinsics used
     pub intrinsics: CameraIntrinsics,
+    /// Point the camera was intended to target for this render.
+    pub target_point: Vec3,
+    /// Policy used to derive `target_point`.
+    pub targeting_policy: TargetingPolicy,
     /// Cheap diagnostics derived from the rendered depth buffer
     pub health: RenderHealth,
     /// Status of this render
@@ -157,9 +170,11 @@ impl BatchRenderOutput {
         image
     }
 
-    /// Convert from RenderOutput, copying all fields
+    /// Convert from RenderOutput, carrying request-level target metadata.
     pub fn from_render_output(request: BatchRenderRequest, output: RenderOutput) -> Self {
         let health = output.health_with_far_plane(request.render_config.far_plane as f64);
+        let target_point = request.target_point;
+        let targeting_policy = request.targeting_policy.clone();
         Self {
             request,
             rgba: output.rgba,
@@ -167,6 +182,8 @@ impl BatchRenderOutput {
             width: output.width,
             height: output.height,
             intrinsics: output.intrinsics,
+            target_point,
+            targeting_policy,
             health,
             status: RenderStatus::Success,
             error_message: None,
@@ -334,6 +351,8 @@ mod tests {
             viewpoint: Transform::default(),
             object_rotation: ObjectRotation::identity(),
             render_config: RenderConfig::tbp_default(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
         assert!(renderer.queue_request(request).is_ok());
         assert_eq!(renderer.pending_count(), 1);
@@ -352,6 +371,8 @@ mod tests {
             viewpoint: Transform::default(),
             object_rotation: ObjectRotation::identity(),
             render_config: RenderConfig::tbp_default(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         assert!(renderer.queue_request(request.clone()).is_ok());
@@ -368,6 +389,8 @@ mod tests {
             viewpoint: Transform::default(),
             object_rotation: ObjectRotation::identity(),
             render_config: RenderConfig::tbp_default(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         // Create minimal output: 2x2 image
@@ -385,6 +408,8 @@ mod tests {
             width: 2,
             height: 2,
             intrinsics: RenderConfig::tbp_default().intrinsics(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
             health: RenderHealth {
                 center_pixel: Some([1, 1]),
                 center_depth: Some(1.0),
@@ -404,5 +429,39 @@ mod tests {
         assert_eq!(rgb.len(), 2); // 2 rows
         assert_eq!(rgb[0].len(), 2); // 2 cols
         assert_eq!(rgb[0][0], [255, 0, 0]); // Red
+    }
+
+    #[test]
+    fn test_batch_render_output_carries_request_target_metadata() {
+        let target_point = Vec3::new(0.25, -0.125, 0.5);
+        let request = BatchRenderRequest {
+            object_dir: "/tmp/test".into(),
+            viewpoint: Transform::default(),
+            object_rotation: ObjectRotation::identity(),
+            render_config: RenderConfig::tbp_default(),
+            target_point,
+            targeting_policy: TargetingPolicy::MeshCenter,
+        };
+        let output = RenderOutput {
+            rgba: vec![0u8; 4],
+            depth: vec![1.0],
+            width: 1,
+            height: 1,
+            intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::default(),
+            object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
+        };
+
+        let batch_output = BatchRenderOutput::from_render_output(request, output);
+
+        assert_eq!(batch_output.target_point, target_point);
+        assert_eq!(batch_output.targeting_policy, TargetingPolicy::MeshCenter);
+        assert_eq!(batch_output.request.target_point, target_point);
+        assert_eq!(
+            batch_output.request.targeting_policy,
+            TargetingPolicy::MeshCenter
+        );
     }
 }

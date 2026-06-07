@@ -92,7 +92,9 @@ cargo run --bin prerender -- \
 The validation command exits non-zero when any object rotation has zero center-foreground hits.
 Batch prerenders also accept `--target mesh-center` and write the targeting policy,
 mesh bounds, target point, camera pose, and render-health summary into the generated
-manifest/index JSON.
+manifest/index JSON. Live `RenderOutput` and `BatchRenderOutput` values also carry
+`target_point` and `targeting_policy`, so consumers do not need to recompute the
+rotated mesh-center pivot from manifest metadata.
 
 ### Library (Rust)
 
@@ -127,8 +129,8 @@ generate the same TBP orbit around the rotated mesh AABB center:
 
 ```rust
 use bevy_sensor::{
-    generate_ycb_object_centered_viewpoints, render_to_buffer, ObjectRotation, RenderConfig,
-    ViewpointConfig,
+    generate_targeted_viewpoints, render_to_buffer_with_target, ObjectRotation, RenderConfig,
+    TargetingPolicy, ViewpointConfig,
 };
 use std::path::Path;
 
@@ -136,16 +138,27 @@ fn render_centered() -> Result<(), Box<dyn std::error::Error>> {
     let object_path = Path::new("/tmp/ycb/033_spatula");
     let config = RenderConfig::tbp_default();
     let rotation = ObjectRotation::new(0.0, 90.0, 0.0);
-    let viewpoints = generate_ycb_object_centered_viewpoints(
+    let targeted = generate_targeted_viewpoints(
         object_path,
         &ViewpointConfig::default(),
         &rotation,
+        &TargetingPolicy::MeshCenter,
     )?;
-    let output = render_to_buffer(object_path, &viewpoints[0], &rotation, &config)?;
+    let output = render_to_buffer_with_target(
+        object_path,
+        &targeted.viewpoints[0],
+        &rotation,
+        &config,
+        targeted.target_point,
+        targeted.policy.clone(),
+    )?;
 
     let health = output.health();
     let surface_point = output.center_surface_point_world();
-    println!("{:?} {:?}", health.center_foreground, surface_point);
+    println!(
+        "{:?} {:?} {:?}",
+        output.target_point, health.center_foreground, surface_point
+    );
     Ok(())
 }
 ```

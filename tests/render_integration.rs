@@ -19,7 +19,8 @@
 use bevy_sensor::{
     backend::detect_platform, batch::BatchRenderRequest, cache::ModelCache, render_batch,
     render_to_buffer, render_to_buffer_cached, BatchRenderConfig, ObjectRotation,
-    PersistentRenderer, RenderConfig, RenderOutput, RenderSession, ViewpointConfig,
+    PersistentRenderer, RenderConfig, RenderOutput, RenderSession, TargetingPolicy, Vec3,
+    ViewpointConfig,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -192,6 +193,8 @@ fn test_batch_render_matches_sequential_episode_outputs() {
             viewpoint: *viewpoint,
             object_rotation: rotation.clone(),
             render_config: config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         })
         .collect();
 
@@ -319,6 +322,8 @@ fn test_session_vs_fresh_n_batch_smoke() {
                     viewpoint: *vp,
                     object_rotation: rotation.clone(),
                     render_config: config.clone(),
+                    target_point: Vec3::ZERO,
+                    targeting_policy: TargetingPolicy::Origin,
                 })
                 .collect()
         })
@@ -511,6 +516,8 @@ fn test_render_session_matches_sequential_across_objects() {
                     viewpoint: *vp,
                     object_rotation: rotation.clone(),
                     render_config: config.clone(),
+                    target_point: Vec3::ZERO,
+                    targeting_policy: TargetingPolicy::Origin,
                 })
                 .collect();
             session.render(&requests).expect("session render failed")
@@ -928,6 +935,8 @@ fn test_persistent_renderer_per_step_throughput_smoke() {
             viewpoint: *vp,
             object_rotation: rotation.clone(),
             render_config: config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
         let _ = session.render(&[req]).expect("session render failed");
     }

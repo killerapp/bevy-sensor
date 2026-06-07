@@ -456,6 +456,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     viewpoint: *viewpoint,
                     object_rotation: rotation.clone(),
                     render_config: render_config.clone(),
+                    target_point: targeted.target_point,
+                    targeting_policy: target_policy.clone(),
                 })
                 .collect();
 
@@ -494,8 +496,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     ],
                     camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
                     camera_rotation_xyzw: [camera_rot.x, camera_rot.y, camera_rot.z, camera_rot.w],
-                    target_point: targeted.target_point.to_array(),
-                    targeting_policy: target_policy.clone(),
+                    target_point: output.target_point.to_array(),
+                    targeting_policy: output.targeting_policy.clone(),
                     mesh_bounds: targeted.mesh_bounds.map(MeshBoundsMetadata::from),
                     health: output.health.clone(),
                     rgba_file,

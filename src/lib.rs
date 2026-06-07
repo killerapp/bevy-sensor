@@ -878,11 +878,22 @@ pub struct RenderOutput {
     pub camera_transform: Transform,
     /// Object rotation applied during render
     pub object_rotation: ObjectRotation,
+    /// Point the camera was intended to target for this render.
+    pub target_point: Vec3,
+    /// Policy used to derive `target_point`.
+    pub targeting_policy: TargetingPolicy,
 }
 
 impl RenderOutput {
     /// Default far plane used by TBP render helpers.
     pub const TBP_FAR_PLANE_METERS: f64 = 10.0;
+
+    /// Attach the render target metadata used to generate this camera transform.
+    pub fn with_targeting(mut self, target_point: Vec3, targeting_policy: TargetingPolicy) -> Self {
+        self.target_point = target_point;
+        self.targeting_policy = targeting_policy;
+        self
+    }
 
     /// Get RGBA pixel at (x, y). Returns None if out of bounds.
     pub fn get_rgba(&self, x: u32, y: u32) -> Option<[u8; 4]> {
@@ -1213,6 +1224,23 @@ pub fn render_to_buffer(
     render::render_headless(object_dir, camera_transform, object_rotation, config)
 }
 
+/// Render a YCB object and attach the target metadata used for the camera pose.
+///
+/// This is useful when callers generate camera transforms with
+/// [`generate_targeted_viewpoints`] and need the live render output to carry the
+/// exact per-render pivot point for downstream pose compensation.
+pub fn render_to_buffer_with_target(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    config: &RenderConfig,
+    target_point: Vec3,
+    targeting_policy: TargetingPolicy,
+) -> Result<RenderOutput, RenderError> {
+    render_to_buffer(object_dir, camera_transform, object_rotation, config)
+        .map(|output| output.with_targeting(target_point, targeting_policy))
+}
+
 /// Render all viewpoints and rotations for a YCB object.
 ///
 /// Convenience function that renders all combinations of viewpoints and rotations.
@@ -1341,6 +1369,8 @@ pub fn validate_center_hits(
                 viewpoint: *viewpoint,
                 object_rotation: rotation.clone(),
                 render_config: render_config.clone(),
+                target_point: targeted.target_point,
+                targeting_policy: target_policy.clone(),
             })
             .collect();
 
@@ -1447,7 +1477,10 @@ pub fn validate_center_hits(
 /// Bevy renderer across calls.
 ///
 /// ```ignore
-/// use bevy_sensor::{render_batch, batch::BatchRenderRequest, BatchRenderConfig, RenderConfig, ObjectRotation};
+/// use bevy_sensor::{
+///     render_batch, batch::BatchRenderRequest, BatchRenderConfig, RenderConfig,
+///     ObjectRotation, TargetingPolicy, Vec3,
+/// };
 ///
 /// let requests: Vec<_> = viewpoints.iter().map(|vp| {
 ///     BatchRenderRequest {
@@ -1455,6 +1488,8 @@ pub fn validate_center_hits(
 ///         viewpoint: *vp,
 ///         object_rotation: ObjectRotation::identity(),
 ///         render_config: RenderConfig::tbp_default(),
+///         target_point: Vec3::ZERO,
+///         targeting_policy: TargetingPolicy::Origin,
 ///     }
 /// }).collect();
 ///
@@ -1564,7 +1599,7 @@ pub fn create_batch_renderer(config: &BatchRenderConfig) -> Result<BatchRenderer
 ///
 /// # Example
 /// ```ignore
-/// use bevy_sensor::{batch::BatchRenderRequest, RenderConfig, ObjectRotation};
+/// use bevy_sensor::{batch::BatchRenderRequest, RenderConfig, ObjectRotation, TargetingPolicy, Vec3};
 /// use std::path::PathBuf;
 ///
 /// queue_render_request(&mut renderer, BatchRenderRequest {
@@ -1572,6 +1607,8 @@ pub fn create_batch_renderer(config: &BatchRenderConfig) -> Result<BatchRenderer
 ///     viewpoint: camera_transform,
 ///     object_rotation: ObjectRotation::identity(),
 ///     render_config: RenderConfig::tbp_default(),
+///     target_point: Vec3::ZERO,
+///     targeting_policy: TargetingPolicy::Origin,
 /// })?;
 /// ```
 pub fn queue_render_request(
@@ -1738,6 +1775,8 @@ mod tests {
             intrinsics,
             camera_transform,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         }
     }
 
@@ -1765,6 +1804,8 @@ mod tests {
             viewpoint: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
             render_config: config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         assert!(requests_share_batch_context(&[
@@ -1784,6 +1825,8 @@ mod tests {
             viewpoint: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
             render_config: config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         assert!(!requests_share_batch_context(&[
@@ -1985,6 +2028,22 @@ mod tests {
         assert!(json.contains("mesh_center"));
         let loaded: TargetingPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded, TargetingPolicy::MeshCenter);
+    }
+
+    #[test]
+    fn test_render_output_with_targeting_overrides_origin_default() {
+        let target_point = Vec3::new(0.1, 0.2, -0.3);
+        let output = render_output_for_depth(
+            1,
+            1,
+            vec![1.0],
+            RenderConfig::tbp_default().intrinsics(),
+            Transform::IDENTITY,
+        )
+        .with_targeting(target_point, TargetingPolicy::MeshCenter);
+
+        assert_eq!(output.target_point, target_point);
+        assert_eq!(output.targeting_policy, TargetingPolicy::MeshCenter);
     }
 
     #[test]
@@ -2234,6 +2293,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         // Top-left: red
@@ -2258,6 +2319,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         assert_eq!(output.get_depth(0, 0), Some(1.0));
@@ -2279,6 +2342,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         let image = output.to_rgb_image();
@@ -2300,6 +2365,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         let depth_image = output.to_depth_image();
@@ -2551,6 +2618,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         // Should handle empty gracefully
@@ -2570,6 +2639,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         assert_eq!(output.get_rgba(0, 0), Some([128, 64, 32, 255]));
