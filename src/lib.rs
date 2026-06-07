@@ -51,8 +51,9 @@
 //! ```
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // Headless rendering implementation
 // Full GPU rendering requires a display - see render module for details
@@ -70,10 +71,13 @@ pub mod cache;
 // Test fixtures for pre-rendered images (CI/CD support)
 pub mod fixtures;
 
+/// Stable renderer/targeting-policy version for cache manifests.
+pub const RENDERER_POLICY_VERSION: &str = "tbp-targeting-v1";
+
 // Re-export ycbust types for convenience
 pub use ycbust::{
-    self, DownloadOptions, Subset as YcbSubset, REPRESENTATIVE_OBJECTS, TBP_SIMILAR_OBJECTS,
-    TBP_STANDARD_OBJECTS,
+    self, DownloadOptions, Subset as YcbSubset, GOOGLE_16K_MESH_RELATIVE, REPRESENTATIVE_OBJECTS,
+    TBP_SIMILAR_OBJECTS, TBP_STANDARD_OBJECTS,
 };
 
 /// YCB dataset utilities
@@ -325,6 +329,62 @@ impl ViewpointConfig {
     }
 }
 
+/// Axis-aligned mesh bounds in object-local coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshBounds {
+    /// Minimum object-local vertex coordinate.
+    pub min: Vec3,
+    /// Maximum object-local vertex coordinate.
+    pub max: Vec3,
+    /// Center of the axis-aligned bounding box.
+    pub center: Vec3,
+    /// Number of vertices inspected while computing the bounds.
+    pub vertex_count: usize,
+}
+
+impl MeshBounds {
+    /// Size of the axis-aligned bounding box on each axis.
+    pub fn extents(&self) -> Vec3 {
+        self.max - self.min
+    }
+}
+
+/// Render-target selection policy for TBP/YCB camera orbits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "policy", content = "target", rename_all = "snake_case")]
+pub enum TargetingPolicy {
+    /// Preserve historical behavior: camera viewpoints look at world origin.
+    Origin,
+    /// Load the YCB mesh AABB center and rotate it by the object rotation.
+    MeshCenter,
+    /// Use a caller-provided world target point.
+    ExplicitTarget([f32; 3]),
+}
+
+impl TargetingPolicy {
+    /// Stable label for manifests and logs.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TargetingPolicy::Origin => "origin",
+            TargetingPolicy::MeshCenter => "mesh-center",
+            TargetingPolicy::ExplicitTarget(_) => "explicit-target",
+        }
+    }
+}
+
+/// Generated viewpoints plus the target metadata used to create them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetedViewpoints {
+    /// Targeting policy used for this viewpoint set.
+    pub policy: TargetingPolicy,
+    /// Point every viewpoint looks at in world coordinates.
+    pub target_point: Vec3,
+    /// Mesh bounds when the policy required loading object-local bounds.
+    pub mesh_bounds: Option<MeshBounds>,
+    /// Camera viewpoints for the selected policy.
+    pub viewpoints: Vec<Transform>,
+}
+
 /// Full sensor configuration for capture sessions
 #[derive(Clone, Debug, Resource)]
 pub struct SensorConfig {
@@ -383,6 +443,16 @@ impl SensorConfig {
 /// - Pitch: elevation angle from horizontal plane (-90° to +90°)
 /// - Radius: distance from origin (object center)
 pub fn generate_viewpoints(config: &ViewpointConfig) -> Vec<Transform> {
+    generate_viewpoints_around_target(config, Vec3::ZERO)
+}
+
+/// Generate camera viewpoints around an explicit target point.
+///
+/// The generated camera offsets match [`generate_viewpoints`], but each camera
+/// is translated by `target` and rotated to look at that target. This is the
+/// caller-provided target form used by NeoCortx parity probes that should not
+/// assume the object surface of interest is at the world origin.
+pub fn generate_viewpoints_around_target(config: &ViewpointConfig, target: Vec3) -> Vec<Transform> {
     let mut views = Vec::with_capacity(config.viewpoint_count());
 
     for pitch_deg in &config.pitch_angles_deg {
@@ -399,11 +469,144 @@ pub fn generate_viewpoints(config: &ViewpointConfig) -> Vec<Transform> {
             let y = config.radius * pitch.sin();
             let z = config.radius * pitch.cos() * yaw.cos();
 
-            let transform = Transform::from_xyz(x, y, z).looking_at(Vec3::ZERO, Vec3::Y);
+            let translation = target + Vec3::new(x, y, z);
+            let transform = Transform::from_translation(translation).looking_at(target, Vec3::Y);
             views.push(transform);
         }
     }
     views
+}
+
+/// Rotate an object-local mesh center into the rendered world frame.
+///
+/// This uses the same object-rotation convention as rendering itself
+/// (`ObjectRotation::to_quat`). It intentionally applies yaw-only rotations as
+/// well as pitch/roll rotations, so downstream parity code does not need a
+/// temporary special case for centered YCB renders.
+pub fn rotated_mesh_center(mesh_center: Vec3, object_rotation: &ObjectRotation) -> Vec3 {
+    object_rotation.to_quat() * mesh_center
+}
+
+/// Generate TBP viewpoint transforms around a rotated object mesh center.
+///
+/// Use this when the YCB mesh's AABB center is a better render target than the
+/// source origin. The camera orbit remains exactly the same shape as
+/// [`generate_viewpoints`], but centered on `object_rotation * mesh_center`.
+pub fn generate_object_centered_viewpoints(
+    config: &ViewpointConfig,
+    mesh_center: Vec3,
+    object_rotation: &ObjectRotation,
+) -> Vec<Transform> {
+    generate_viewpoints_around_target(config, rotated_mesh_center(mesh_center, object_rotation))
+}
+
+/// Load axis-aligned bounds from an OBJ mesh.
+///
+/// This is a small public wrapper around the same YCB `google_16k/textured.obj`
+/// layout used by the renderer. It lets downstream callers avoid carrying their
+/// own OBJ parsing just to target an object's visual center.
+pub fn load_mesh_bounds(mesh_path: &Path) -> Result<MeshBounds, RenderError> {
+    if !mesh_path.exists() {
+        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+    }
+
+    let (models, _) = tobj::load_obj(
+        mesh_path,
+        &tobj::LoadOptions {
+            triangulate: false,
+            single_index: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|err| {
+        RenderError::DataParsingError(format!(
+            "Failed to parse OBJ mesh {}: {}",
+            mesh_path.display(),
+            err
+        ))
+    })?;
+
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut vertex_count = 0usize;
+
+    for model in models {
+        for vertex in model.mesh.positions.chunks_exact(3) {
+            let point = Vec3::new(vertex[0], vertex[1], vertex[2]);
+            min = min.min(point);
+            max = max.max(point);
+            vertex_count += 1;
+        }
+    }
+
+    if vertex_count == 0 {
+        return Err(RenderError::DataParsingError(format!(
+            "OBJ mesh {} contains no vertices",
+            mesh_path.display()
+        )));
+    }
+
+    Ok(MeshBounds {
+        min,
+        max,
+        center: (min + max) * 0.5,
+        vertex_count,
+    })
+}
+
+/// Load bounds for a YCB object directory using the standard google_16k mesh.
+pub fn load_ycb_mesh_bounds(object_dir: &Path) -> Result<MeshBounds, RenderError> {
+    load_mesh_bounds(&object_dir.join(GOOGLE_16K_MESH_RELATIVE))
+}
+
+/// Generate object-centered TBP viewpoints for a YCB object directory.
+pub fn generate_ycb_object_centered_viewpoints(
+    object_dir: &Path,
+    config: &ViewpointConfig,
+    object_rotation: &ObjectRotation,
+) -> Result<Vec<Transform>, RenderError> {
+    let bounds = load_ycb_mesh_bounds(object_dir)?;
+    Ok(generate_object_centered_viewpoints(
+        config,
+        bounds.center,
+        object_rotation,
+    ))
+}
+
+/// Generate viewpoints for a requested targeting policy.
+pub fn generate_targeted_viewpoints(
+    object_dir: &Path,
+    config: &ViewpointConfig,
+    object_rotation: &ObjectRotation,
+    policy: &TargetingPolicy,
+) -> Result<TargetedViewpoints, RenderError> {
+    match policy {
+        TargetingPolicy::Origin => Ok(TargetedViewpoints {
+            policy: policy.clone(),
+            target_point: Vec3::ZERO,
+            mesh_bounds: None,
+            viewpoints: generate_viewpoints(config),
+        }),
+        TargetingPolicy::MeshCenter => {
+            let bounds = load_ycb_mesh_bounds(object_dir)?;
+            let target_point = rotated_mesh_center(bounds.center, object_rotation);
+            Ok(TargetedViewpoints {
+                policy: policy.clone(),
+                target_point,
+                mesh_bounds: Some(bounds),
+                viewpoints: generate_viewpoints_around_target(config, target_point),
+            })
+        }
+        TargetingPolicy::ExplicitTarget(target) => {
+            let target_point = Vec3::from_array(*target);
+            Ok(TargetedViewpoints {
+                policy: policy.clone(),
+                target_point,
+                mesh_bounds: None,
+                viewpoints: generate_viewpoints_around_target(config, target_point),
+            })
+        }
+    }
 }
 
 /// Marker component for the target object being captured
@@ -633,6 +836,29 @@ impl CameraIntrinsics {
     }
 }
 
+/// Cheap diagnostics derived from a rendered depth buffer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RenderHealth {
+    /// Center pixel selected from camera intrinsics, clamped to image bounds.
+    pub center_pixel: Option<[u32; 2]>,
+    /// Raw depth at the center pixel, including far-plane/background values.
+    pub center_depth: Option<f64>,
+    /// Whether the center pixel has a finite positive depth before the far plane.
+    pub center_foreground: bool,
+    /// Number of foreground pixels in the full depth buffer.
+    pub foreground_pixel_count: usize,
+    /// Foreground fraction in `[0, 1]` over the declared image size.
+    pub foreground_coverage: f64,
+    /// Number of foreground pixels in the 5x5 window centered on `center_pixel`.
+    pub center_5x5_foreground_count: usize,
+    /// Foreground pixel nearest to `center_pixel`, if any foreground exists.
+    pub nearest_foreground_pixel: Option<[u32; 2]>,
+    /// Depth at `nearest_foreground_pixel`.
+    pub nearest_foreground_depth: Option<f64>,
+    /// Euclidean pixel distance from `center_pixel` to `nearest_foreground_pixel`.
+    pub nearest_foreground_distance_px: Option<f64>,
+}
+
 /// Output from headless rendering containing RGBA and depth data.
 #[derive(Clone, Debug)]
 pub struct RenderOutput {
@@ -655,6 +881,9 @@ pub struct RenderOutput {
 }
 
 impl RenderOutput {
+    /// Default far plane used by TBP render helpers.
+    pub const TBP_FAR_PLANE_METERS: f64 = 10.0;
+
     /// Get RGBA pixel at (x, y). Returns None if out of bounds.
     pub fn get_rgba(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         if x >= self.width || y >= self.height {
@@ -681,6 +910,191 @@ impl RenderOutput {
     /// Get RGB pixel (without alpha) at (x, y).
     pub fn get_rgb(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         self.get_rgba(x, y).map(|rgba| [rgba[0], rgba[1], rgba[2]])
+    }
+
+    /// Pixel nearest the camera principal point, clamped to image bounds.
+    pub fn center_pixel(&self) -> Option<[u32; 2]> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+
+        let x = self.intrinsics.principal_point[0]
+            .round()
+            .clamp(0.0, (self.width - 1) as f64) as u32;
+        let y = self.intrinsics.principal_point[1]
+            .round()
+            .clamp(0.0, (self.height - 1) as f64) as u32;
+        Some([x, y])
+    }
+
+    /// Raw center-pixel depth, including far-plane/background values.
+    pub fn center_pixel_raw_depth(&self) -> Option<f64> {
+        let [x, y] = self.center_pixel()?;
+        self.get_depth(x, y)
+    }
+
+    /// Center-pixel object depth using the TBP default far plane.
+    pub fn center_pixel_depth(&self) -> Option<f64> {
+        self.center_pixel_depth_with_far_plane(Self::TBP_FAR_PLANE_METERS)
+    }
+
+    /// Center-pixel object depth using a caller-provided far plane.
+    pub fn center_pixel_depth_with_far_plane(&self, far_plane: f64) -> Option<f64> {
+        self.center_pixel_raw_depth()
+            .filter(|depth| Self::is_foreground_depth(*depth, far_plane))
+    }
+
+    /// Whether a depth value should be treated as foreground/object surface.
+    pub fn is_foreground_depth(depth: f64, far_plane: f64) -> bool {
+        depth.is_finite() && depth > 0.0 && far_plane.is_finite() && depth < far_plane * 0.999
+    }
+
+    /// Compute render-health diagnostics using the TBP default far plane.
+    pub fn health(&self) -> RenderHealth {
+        self.health_with_far_plane(Self::TBP_FAR_PLANE_METERS)
+    }
+
+    /// Compute render-health diagnostics using a caller-provided far plane.
+    pub fn health_with_far_plane(&self, far_plane: f64) -> RenderHealth {
+        let center_pixel = self.center_pixel();
+        let center_depth = self.center_pixel_raw_depth();
+        let center_foreground = center_depth
+            .map(|depth| Self::is_foreground_depth(depth, far_plane))
+            .unwrap_or(false);
+
+        let total_pixels = (self.width as usize).saturating_mul(self.height as usize);
+        let mut foreground_pixel_count = 0usize;
+        let mut center_5x5_foreground_count = 0usize;
+        let mut nearest_foreground_pixel = None;
+        let mut nearest_foreground_depth = None;
+        let mut nearest_foreground_distance_px = None;
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let Some(depth) = self.get_depth(x, y) else {
+                    continue;
+                };
+                if !Self::is_foreground_depth(depth, far_plane) {
+                    continue;
+                }
+
+                foreground_pixel_count += 1;
+
+                if let Some([cx, cy]) = center_pixel {
+                    let dx = x as i64 - cx as i64;
+                    let dy = y as i64 - cy as i64;
+
+                    if dx.abs() <= 2 && dy.abs() <= 2 {
+                        center_5x5_foreground_count += 1;
+                    }
+
+                    let distance = ((dx * dx + dy * dy) as f64).sqrt();
+                    if nearest_foreground_distance_px
+                        .map(|current| distance < current)
+                        .unwrap_or(true)
+                    {
+                        nearest_foreground_pixel = Some([x, y]);
+                        nearest_foreground_depth = Some(depth);
+                        nearest_foreground_distance_px = Some(distance);
+                    }
+                }
+            }
+        }
+
+        RenderHealth {
+            center_pixel,
+            center_depth,
+            center_foreground,
+            foreground_pixel_count,
+            foreground_coverage: if total_pixels > 0 {
+                foreground_pixel_count as f64 / total_pixels as f64
+            } else {
+                0.0
+            },
+            center_5x5_foreground_count,
+            nearest_foreground_pixel,
+            nearest_foreground_depth,
+            nearest_foreground_distance_px,
+        }
+    }
+
+    /// Transform a point from Bevy camera-local coordinates into world space.
+    pub fn camera_to_world_point(&self, camera_point: [f64; 3]) -> [f64; 3] {
+        let point = Vec3::new(
+            camera_point[0] as f32,
+            camera_point[1] as f32,
+            camera_point[2] as f32,
+        );
+        let rotated = self.camera_transform.rotation * point;
+        let translated = self.camera_transform.translation + rotated;
+        [
+            translated.x as f64,
+            translated.y as f64,
+            translated.z as f64,
+        ]
+    }
+
+    /// Transform a point from world space into Bevy camera-local coordinates.
+    pub fn world_to_camera_point(&self, world_point: [f64; 3]) -> [f64; 3] {
+        let point = Vec3::new(
+            world_point[0] as f32,
+            world_point[1] as f32,
+            world_point[2] as f32,
+        );
+        let relative = point - self.camera_transform.translation;
+        let camera_point = self.camera_transform.rotation.inverse() * relative;
+        [
+            camera_point.x as f64,
+            camera_point.y as f64,
+            camera_point.z as f64,
+        ]
+    }
+
+    /// Surface point at the center pixel using the TBP default far plane.
+    pub fn center_surface_point_world(&self) -> Option<[f64; 3]> {
+        self.center_surface_point_world_with_far_plane(Self::TBP_FAR_PLANE_METERS)
+    }
+
+    /// Surface point at the center pixel using a caller-provided far plane.
+    pub fn center_surface_point_world_with_far_plane(&self, far_plane: f64) -> Option<[f64; 3]> {
+        let [x, y] = self.center_pixel()?;
+        self.pixel_surface_point_world_with_far_plane([x, y], far_plane)
+    }
+
+    /// Surface point at `pixel` using the TBP default far plane.
+    pub fn pixel_surface_point_world(&self, pixel: [u32; 2]) -> Option<[f64; 3]> {
+        self.pixel_surface_point_world_with_far_plane(pixel, Self::TBP_FAR_PLANE_METERS)
+    }
+
+    /// Surface point at `pixel` using a caller-provided far plane.
+    ///
+    /// Pixel coordinates follow image convention (`x` right, `y` down). The
+    /// returned point is in world space. Internally this maps to Bevy's camera
+    /// frame (`+X` right, `+Y` up, `-Z` forward).
+    pub fn pixel_surface_point_world_with_far_plane(
+        &self,
+        pixel: [u32; 2],
+        far_plane: f64,
+    ) -> Option<[f64; 3]> {
+        let [x, y] = pixel;
+        let depth = self.get_depth(x, y)?;
+        if !Self::is_foreground_depth(depth, far_plane) {
+            return None;
+        }
+
+        let fx = self.intrinsics.focal_length[0];
+        let fy = self.intrinsics.focal_length[1];
+        if !fx.is_finite()
+            || !fy.is_finite()
+            || fx.abs() <= f64::EPSILON
+            || fy.abs() <= f64::EPSILON
+        {
+            return None;
+        }
+
+        let camera_x = (x as f64 - self.intrinsics.principal_point[0]) / fx * depth;
+        let camera_y = -((y as f64 - self.intrinsics.principal_point[1]) / fy * depth);
+        Some(self.camera_to_world_point([camera_x, camera_y, -depth]))
     }
 
     /// Convert to neocortx-compatible image format: Vec<Vec<[u8; 3]>>
@@ -828,6 +1242,153 @@ pub fn render_all_viewpoints(
     }
 
     Ok(outputs)
+}
+
+/// Structured center-hit validation report for one object.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CenterHitValidationReport {
+    /// Object identifier used in logs/manifests.
+    pub object_id: String,
+    /// Object directory rendered.
+    pub object_dir: String,
+    /// Targeting policy used for all rotations.
+    pub target_policy: TargetingPolicy,
+    /// Per-rotation center-hit results.
+    pub rotations: Vec<CenterHitRotationReport>,
+}
+
+impl CenterHitValidationReport {
+    /// True when every rotation has at least one center-foreground hit.
+    pub fn is_valid(&self) -> bool {
+        self.rotations
+            .iter()
+            .all(|rotation| rotation.center_hits > 0)
+    }
+
+    /// Rotation indices with zero center-foreground hits.
+    pub fn zero_hit_rotations(&self) -> Vec<usize> {
+        self.rotations
+            .iter()
+            .filter(|rotation| rotation.center_hits == 0)
+            .map(|rotation| rotation.rotation_index)
+            .collect()
+    }
+}
+
+/// Center-hit validation result for a single object rotation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CenterHitRotationReport {
+    pub rotation_index: usize,
+    pub rotation_euler: [f64; 3],
+    pub target_point: [f32; 3],
+    pub mesh_bounds: Option<MeshBoundsMetadata>,
+    pub total_viewpoints: usize,
+    pub center_hits: usize,
+    pub center_misses: usize,
+    pub misses: Vec<CenterHitMiss>,
+}
+
+/// Serializable mesh-bounds metadata for reports and manifests.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshBoundsMetadata {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    pub center: [f32; 3],
+    pub vertex_count: usize,
+}
+
+impl From<MeshBounds> for MeshBoundsMetadata {
+    fn from(bounds: MeshBounds) -> Self {
+        Self {
+            min: bounds.min.to_array(),
+            max: bounds.max.to_array(),
+            center: bounds.center.to_array(),
+            vertex_count: bounds.vertex_count,
+        }
+    }
+}
+
+/// Center-hit miss with enough metadata to reproduce the bad viewpoint.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CenterHitMiss {
+    pub viewpoint_index: usize,
+    pub camera_position: [f32; 3],
+    pub camera_rotation_xyzw: [f32; 4],
+    pub health: RenderHealth,
+}
+
+/// Validate that each rotation has at least one viewpoint whose center pixel
+/// lands on foreground before the render far plane.
+pub fn validate_center_hits(
+    object_id: impl Into<String>,
+    object_dir: &Path,
+    viewpoint_config: &ViewpointConfig,
+    rotations: &[ObjectRotation],
+    render_config: &RenderConfig,
+    target_policy: &TargetingPolicy,
+) -> Result<CenterHitValidationReport, RenderError> {
+    let object_id = object_id.into();
+    let mut rotation_reports = Vec::with_capacity(rotations.len());
+
+    for (rotation_index, rotation) in rotations.iter().enumerate() {
+        let targeted =
+            generate_targeted_viewpoints(object_dir, viewpoint_config, rotation, target_policy)?;
+        let requests: Vec<batch::BatchRenderRequest> = targeted
+            .viewpoints
+            .iter()
+            .map(|viewpoint| batch::BatchRenderRequest {
+                object_dir: PathBuf::from(object_dir),
+                viewpoint: *viewpoint,
+                object_rotation: rotation.clone(),
+                render_config: render_config.clone(),
+            })
+            .collect();
+
+        let outputs = render_batch(requests, &batch::BatchRenderConfig::default())
+            .map_err(|error| RenderError::RenderFailed(error.to_string()))?;
+
+        let mut center_hits = 0usize;
+        let mut misses = Vec::new();
+        for (viewpoint_index, output) in outputs.iter().enumerate() {
+            if output.status != batch::RenderStatus::Success {
+                return Err(RenderError::RenderFailed(format!(
+                    "Render failed for {} rotation {} viewpoint {}: {:?}",
+                    object_id, rotation_index, viewpoint_index, output.error_message
+                )));
+            }
+
+            if output.health.center_foreground {
+                center_hits += 1;
+            } else {
+                let t = output.request.viewpoint.translation;
+                let q = output.request.viewpoint.rotation;
+                misses.push(CenterHitMiss {
+                    viewpoint_index,
+                    camera_position: [t.x, t.y, t.z],
+                    camera_rotation_xyzw: [q.x, q.y, q.z, q.w],
+                    health: output.health.clone(),
+                });
+            }
+        }
+
+        rotation_reports.push(CenterHitRotationReport {
+            rotation_index,
+            rotation_euler: [rotation.pitch, rotation.yaw, rotation.roll],
+            target_point: targeted.target_point.to_array(),
+            mesh_bounds: targeted.mesh_bounds.map(MeshBoundsMetadata::from),
+            total_viewpoints: outputs.len(),
+            center_hits,
+            center_misses: outputs.len().saturating_sub(center_hits),
+            misses,
+        });
+    }
+
+    Ok(CenterHitValidationReport {
+        object_id,
+        object_dir: object_dir.display().to_string(),
+        target_policy: target_policy.clone(),
+        rotations: rotation_reports,
+    })
 }
 
 /// Render with model caching support for efficient multi-viewpoint rendering.
@@ -1141,6 +1702,45 @@ pub use bevy::prelude::{Quat, Transform, Vec3};
 mod tests {
     use super::*;
 
+    fn assert_vec3_close(actual: Vec3, expected: Vec3) {
+        assert!(
+            (actual - expected).length() < 1e-5,
+            "expected {:?}, got {:?}",
+            expected,
+            actual
+        );
+    }
+
+    fn assert_point_close(actual: [f64; 3], expected: [f64; 3]) {
+        for axis in 0..3 {
+            assert!(
+                (actual[axis] - expected[axis]).abs() < 1e-5,
+                "axis {} expected {:?}, got {:?}",
+                axis,
+                expected,
+                actual
+            );
+        }
+    }
+
+    fn render_output_for_depth(
+        width: u32,
+        height: u32,
+        depth: Vec<f64>,
+        intrinsics: CameraIntrinsics,
+        camera_transform: Transform,
+    ) -> RenderOutput {
+        RenderOutput {
+            rgba: vec![0u8; (width * height * 4) as usize],
+            depth,
+            width,
+            height,
+            intrinsics,
+            camera_transform,
+            object_rotation: ObjectRotation::identity(),
+        }
+    }
+
     #[test]
     fn test_object_rotation_identity() {
         let rot = ObjectRotation::identity();
@@ -1284,6 +1884,141 @@ mod tests {
                 dot
             );
         }
+    }
+
+    #[test]
+    fn test_generate_viewpoints_around_target_preserves_orbit() {
+        let config = ViewpointConfig {
+            radius: 2.0,
+            yaw_count: 4,
+            pitch_angles_deg: vec![0.0],
+        };
+        let target = Vec3::new(1.0, -0.5, 0.25);
+        let viewpoints = generate_viewpoints_around_target(&config, target);
+
+        assert_eq!(viewpoints.len(), 4);
+        for (i, transform) in viewpoints.iter().enumerate() {
+            let offset = transform.translation - target;
+            assert!(
+                (offset.length() - config.radius).abs() < 1e-5,
+                "viewpoint {} has radius {}, expected {}",
+                i,
+                offset.length(),
+                config.radius
+            );
+
+            let forward = transform.forward();
+            let to_target = (target - transform.translation).normalize();
+            assert!(
+                forward.dot(to_target) > 0.99,
+                "viewpoint {} is not looking at target",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_viewpoints_keeps_origin_targeting() {
+        let config = ViewpointConfig {
+            radius: 1.0,
+            yaw_count: 1,
+            pitch_angles_deg: vec![0.0],
+        };
+
+        let origin_view = generate_viewpoints(&config)[0];
+        let explicit_origin_view = generate_viewpoints_around_target(&config, Vec3::ZERO)[0];
+
+        assert_vec3_close(origin_view.translation, explicit_origin_view.translation);
+        let forward = origin_view.forward();
+        let to_origin = (Vec3::ZERO - origin_view.translation).normalize();
+        assert!(forward.dot(to_origin) > 0.99);
+    }
+
+    #[test]
+    fn test_object_centered_viewpoints_apply_yaw_rotation_to_target() {
+        let config = ViewpointConfig {
+            radius: 1.0,
+            yaw_count: 1,
+            pitch_angles_deg: vec![0.0],
+        };
+        let mesh_center = Vec3::new(0.25, 0.0, 0.0);
+        let rotation = ObjectRotation::new(0.0, 90.0, 0.0);
+
+        let target = rotated_mesh_center(mesh_center, &rotation);
+        assert!(target.distance(mesh_center) > 0.1);
+
+        let origin_view = generate_viewpoints(&config)[0];
+        let centered_view = generate_object_centered_viewpoints(&config, mesh_center, &rotation)[0];
+
+        assert_vec3_close(centered_view.translation, origin_view.translation + target);
+        let forward = centered_view.forward();
+        let to_target = (target - centered_view.translation).normalize();
+        assert!(forward.dot(to_target) > 0.99);
+    }
+
+    #[test]
+    fn test_load_ycb_mesh_bounds_from_standard_obj_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh_dir = dir.path().join("google_16k");
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+        std::fs::write(
+            mesh_dir.join("textured.obj"),
+            "v -1.0 -2.0 -3.0\nv 3.0 4.0 5.0\nv 1.0 0.0 2.0\nf 1 2 3\n",
+        )
+        .unwrap();
+
+        let bounds = load_ycb_mesh_bounds(dir.path()).unwrap();
+
+        assert_eq!(bounds.vertex_count, 3);
+        assert_vec3_close(bounds.min, Vec3::new(-1.0, -2.0, -3.0));
+        assert_vec3_close(bounds.max, Vec3::new(3.0, 4.0, 5.0));
+        assert_vec3_close(bounds.center, Vec3::new(1.0, 1.0, 1.0));
+        assert_vec3_close(bounds.extents(), Vec3::new(4.0, 6.0, 8.0));
+    }
+
+    #[test]
+    fn test_targeting_policy_serializes_stable_label() {
+        assert_eq!(TargetingPolicy::Origin.label(), "origin");
+        assert_eq!(TargetingPolicy::MeshCenter.label(), "mesh-center");
+
+        let json = serde_json::to_string(&TargetingPolicy::MeshCenter).unwrap();
+        assert!(json.contains("mesh_center"));
+        let loaded: TargetingPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, TargetingPolicy::MeshCenter);
+    }
+
+    #[test]
+    fn test_center_hit_validation_report_detects_zero_hit_rotation() {
+        let report = CenterHitValidationReport {
+            object_id: "test_object".to_string(),
+            object_dir: "/tmp/ycb/test_object".to_string(),
+            target_policy: TargetingPolicy::MeshCenter,
+            rotations: vec![
+                CenterHitRotationReport {
+                    rotation_index: 0,
+                    rotation_euler: [0.0, 0.0, 0.0],
+                    target_point: [0.0, 0.0, 0.0],
+                    mesh_bounds: None,
+                    total_viewpoints: 24,
+                    center_hits: 1,
+                    center_misses: 23,
+                    misses: Vec::new(),
+                },
+                CenterHitRotationReport {
+                    rotation_index: 1,
+                    rotation_euler: [0.0, 90.0, 0.0],
+                    target_point: [0.1, 0.0, 0.0],
+                    mesh_bounds: None,
+                    total_viewpoints: 24,
+                    center_hits: 0,
+                    center_misses: 24,
+                    misses: Vec::new(),
+                },
+            ],
+        };
+
+        assert!(!report.is_valid());
+        assert_eq!(report.zero_hit_rotations(), vec![1]);
     }
 
     #[test]
@@ -1571,6 +2306,135 @@ mod tests {
         assert_eq!(depth_image.len(), 2);
         assert_eq!(depth_image[0], vec![1.0, 2.0]);
         assert_eq!(depth_image[1], vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_render_health_center_hit() {
+        let mut depth = vec![10.0; 7 * 7];
+        depth[3 * 7 + 3] = 0.25;
+        depth[6 * 7 + 6] = 0.5;
+        let output = render_output_for_depth(
+            7,
+            7,
+            depth,
+            CameraIntrinsics {
+                focal_length: [10.0, 10.0],
+                principal_point: [3.0, 3.0],
+                image_size: [7, 7],
+            },
+            Transform::IDENTITY,
+        );
+
+        let health = output.health();
+
+        assert_eq!(health.center_pixel, Some([3, 3]));
+        assert_eq!(health.center_depth, Some(0.25));
+        assert!(health.center_foreground);
+        assert_eq!(health.foreground_pixel_count, 2);
+        assert!((health.foreground_coverage - 2.0 / 49.0).abs() < 1e-12);
+        assert_eq!(health.center_5x5_foreground_count, 1);
+        assert_eq!(health.nearest_foreground_pixel, Some([3, 3]));
+        assert_eq!(health.nearest_foreground_depth, Some(0.25));
+        assert_eq!(health.nearest_foreground_distance_px, Some(0.0));
+    }
+
+    #[test]
+    fn test_render_health_far_center_uses_nearest_foreground() {
+        let mut depth = vec![10.0; 7 * 7];
+        depth[3 * 7 + 1] = 0.5;
+        let output = render_output_for_depth(
+            7,
+            7,
+            depth,
+            CameraIntrinsics {
+                focal_length: [10.0, 10.0],
+                principal_point: [3.0, 3.0],
+                image_size: [7, 7],
+            },
+            Transform::IDENTITY,
+        );
+
+        let health = output.health();
+
+        assert_eq!(health.center_pixel, Some([3, 3]));
+        assert_eq!(health.center_depth, Some(10.0));
+        assert!(!health.center_foreground);
+        assert_eq!(health.foreground_pixel_count, 1);
+        assert_eq!(health.center_5x5_foreground_count, 1);
+        assert_eq!(health.nearest_foreground_pixel, Some([1, 3]));
+        assert_eq!(health.nearest_foreground_depth, Some(0.5));
+        assert_eq!(health.nearest_foreground_distance_px, Some(2.0));
+    }
+
+    #[test]
+    fn test_center_surface_point_world_uses_bevy_camera_forward() {
+        let mut depth = vec![10.0; 3 * 3];
+        depth[3 + 1] = 0.25;
+        let output = render_output_for_depth(
+            3,
+            3,
+            depth,
+            CameraIntrinsics {
+                focal_length: [1.0, 1.0],
+                principal_point: [1.0, 1.0],
+                image_size: [3, 3],
+            },
+            Transform::IDENTITY,
+        );
+
+        assert_eq!(output.center_pixel_depth(), Some(0.25));
+        assert_point_close(
+            output.center_surface_point_world().expect("surface point"),
+            [0.0, 0.0, -0.25],
+        );
+    }
+
+    #[test]
+    fn test_pixel_surface_point_world_maps_image_y_down_to_camera_y_up() {
+        let mut depth = vec![10.0; 3 * 3];
+        depth[2] = 2.0;
+        let output = render_output_for_depth(
+            3,
+            3,
+            depth,
+            CameraIntrinsics {
+                focal_length: [1.0, 1.0],
+                principal_point: [1.0, 1.0],
+                image_size: [3, 3],
+            },
+            Transform::IDENTITY,
+        );
+
+        assert_point_close(
+            output
+                .pixel_surface_point_world([2, 0])
+                .expect("surface point"),
+            [2.0, 2.0, -2.0],
+        );
+    }
+
+    #[test]
+    fn test_camera_world_point_helpers_roundtrip() {
+        let output = render_output_for_depth(
+            1,
+            1,
+            vec![0.25],
+            CameraIntrinsics {
+                focal_length: [1.0, 1.0],
+                principal_point: [0.0, 0.0],
+                image_size: [1, 1],
+            },
+            Transform::from_xyz(0.0, 0.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
+        );
+
+        assert_point_close(
+            output.center_surface_point_world().expect("surface point"),
+            [0.0, 0.0, 0.75],
+        );
+
+        let world_point = [0.1, -0.2, 0.7];
+        let camera_point = output.world_to_camera_point(world_point);
+        assert_point_close(output.camera_to_world_point(camera_point), world_point);
     }
 
     #[test]

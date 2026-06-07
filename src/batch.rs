@@ -41,7 +41,7 @@
 //! }
 //! ```
 
-use crate::{CameraIntrinsics, ObjectRotation, RenderConfig, RenderOutput};
+use crate::{CameraIntrinsics, ObjectRotation, RenderConfig, RenderHealth, RenderOutput};
 use bevy::prelude::Transform;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -112,6 +112,8 @@ pub struct BatchRenderOutput {
     pub height: u32,
     /// Camera intrinsics used
     pub intrinsics: CameraIntrinsics,
+    /// Cheap diagnostics derived from the rendered depth buffer
+    pub health: RenderHealth,
     /// Status of this render
     pub status: RenderStatus,
     /// Error message if status is Failed or PartialFailure
@@ -157,6 +159,7 @@ impl BatchRenderOutput {
 
     /// Convert from RenderOutput, copying all fields
     pub fn from_render_output(request: BatchRenderRequest, output: RenderOutput) -> Self {
+        let health = output.health_with_far_plane(request.render_config.far_plane as f64);
         Self {
             request,
             rgba: output.rgba,
@@ -164,6 +167,7 @@ impl BatchRenderOutput {
             width: output.width,
             height: output.height,
             intrinsics: output.intrinsics,
+            health,
             status: RenderStatus::Success,
             error_message: None,
         }
@@ -381,6 +385,17 @@ mod tests {
             width: 2,
             height: 2,
             intrinsics: RenderConfig::tbp_default().intrinsics(),
+            health: RenderHealth {
+                center_pixel: Some([1, 1]),
+                center_depth: Some(1.0),
+                center_foreground: true,
+                foreground_pixel_count: 4,
+                foreground_coverage: 1.0,
+                center_5x5_foreground_count: 4,
+                nearest_foreground_pixel: Some([1, 1]),
+                nearest_foreground_depth: Some(1.0),
+                nearest_foreground_distance_px: Some(0.0),
+            },
             status: RenderStatus::Success,
             error_message: None,
         };
