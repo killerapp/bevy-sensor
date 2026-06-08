@@ -175,6 +175,19 @@ struct RenderState {
     texture_ready_frame: u32,
     capture_ready: bool,
     screenshot_requested: bool,
+    /// Number of frames spent waiting for a *valid* (non-blank / valid-depth)
+    /// readback. The one-shot GPU capture is nondeterministic and occasionally
+    /// reads a uniform clear-color frame; we reject those and keep capturing
+    /// until a real frame lands, bounded by this counter.
+    capture_retries: u32,
+    /// Previous frame's RGBA readback. The capture is accepted only once two
+    /// consecutive readbacks are identical (the render has settled), so partial
+    /// in-progress frames aren't captured and every render path yields the same
+    /// fully-drawn image (required for byte-exact cross-path parity).
+    prev_rgba: Option<Vec<u8>>,
+    /// Previous frame's depth readback, for the same settle-detection as
+    /// `prev_rgba` (depth parity is asserted to ~1e-9, i.e. bit-exact).
+    prev_depth: Option<Vec<f64>>,
     captured: bool,
     exit_requested: bool,
     #[allow(dead_code)]
@@ -2224,50 +2237,78 @@ fn check_headless_capture_ready(
     }
 
     state.frame_count += 1;
+    state.capture_retries += 1;
+    // Bounded fallback so a genuinely-uniform scene (or persistent invalid
+    // readback) still terminates instead of hanging to the watchdog.
+    let force_accept = state.capture_retries > 150;
 
-    // Check if RGBA data is ready
-    let rgba_ready = if let Ok(guard) = shared_rgba.0.lock() {
-        if let Some((rgba_data, width, height)) = guard.as_ref() {
-            if state.rgba_data.is_none() {
-                state.rgba_data = Some(rgba_data.clone());
-                state.image_width = *width;
-                state.image_height = *height;
-                // Disable further captures
-                for mut copier in query.iter_mut() {
-                    copier.enabled = false;
+    // RGBA: accept the first non-blank frame. Uniform clear-color frames are
+    // pre-geometry reads from the nondeterministic one-shot capture — reject and
+    // retry. The copier stays enabled until BOTH RGBA and depth are valid so a
+    // late/odd depth frame can still be captured.
+    if state.rgba_data.is_none() {
+        let captured_rgba = shared_rgba.0.lock().ok().and_then(|g| g.clone());
+        if let Some((rgba_data, width, height)) = captured_rgba {
+            let non_blank = rgba_data
+                .chunks_exact(4)
+                .any(|px| px[0..3] != rgba_data[0..3]);
+            // Stable == identical to the previous readback (render has settled).
+            let stable = state.prev_rgba.as_deref() == Some(rgba_data.as_slice());
+            if (non_blank && stable) || force_accept {
+                state.image_width = width;
+                state.image_height = height;
+                state.rgba_data = Some(rgba_data);
+                state.prev_rgba = None;
+            } else {
+                // Not settled yet: remember this frame and re-read fresh next one.
+                state.prev_rgba = Some(rgba_data);
+                if let Ok(mut g) = shared_rgba.0.lock() {
+                    *g = None;
                 }
             }
-            true
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
 
-    // Check if depth data is ready
-    let depth_ready = if let Ok(guard) = shared_depth.0.lock() {
-        if let Some((depth_data, _width, _height)) = guard.as_ref() {
-            if state.depth_data.is_none() {
-                state.depth_data = Some(depth_data.clone());
+    // Depth: accept the first readback that contains real foreground (the depth
+    // readback can also miss the geometry, leaving an all-far-plane buffer).
+    if state.depth_data.is_none() {
+        let captured_depth = shared_depth.0.lock().ok().and_then(|g| g.clone());
+        if let Some((depth_data, _w, _h)) = captured_depth {
+            let far = request.config.far_plane as f64;
+            let has_foreground = depth_data
+                .iter()
+                .any(|&d| RenderOutput::is_foreground_depth(d, far));
+            // Settled == identical to the previous depth readback.
+            let stable = state.prev_depth.as_deref() == Some(depth_data.as_slice());
+            if has_foreground && stable {
+                state.depth_data = Some(depth_data);
+                state.prev_depth = None;
+            } else {
+                state.prev_depth = Some(depth_data);
+                if let Ok(mut g) = shared_depth.0.lock() {
+                    *g = None; // discard; retry next frame
+                }
             }
-            true
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
 
-    // Fallback to placeholder depth after 10 extra frames if depth readback fails
-    if rgba_ready && !depth_ready && state.frame_count > 70 {
+    // Last-resort fallback so we never hang the watchdog: once RGBA is in hand
+    // and we've retried a lot, fill a uniform camera-distance depth placeholder.
+    if state.rgba_data.is_some() && state.depth_data.is_none() && force_accept {
         let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
         state.depth_data = Some(vec![camera_dist; pixel_count]);
     }
 
-    if state.rgba_data.is_some() && state.depth_data.is_some() {
+    let rgba_ready = state.rgba_data.is_some();
+    let depth_ready = state.depth_data.is_some();
+
+    // Both valid → capture complete; stop the copier.
+    if rgba_ready && depth_ready {
         state.captured = true;
+        for mut copier in query.iter_mut() {
+            copier.enabled = false;
+        }
     }
 
     if let Some(t0) = t0 {
@@ -2828,11 +2869,70 @@ impl RenderSession {
                 }
             }
 
-            // Install the viewpoint sequence for this render() call.
+            // Install a single-viewpoint WARMUP sequence (output discarded).
+            world.insert_resource(HeadlessBatchSequence::new(vec![viewpoints[0]]));
+        }
+
+        // --- warmup render (discarded) ---
+        // The despawn/respawn scene swap above leaves the new object's mesh
+        // extracted in the retained render world but NOT drawn into the color
+        // target on its first capture (verified: render_mesh_instances=1 at the
+        // capture frame, yet the captured RGBA is the clear color). Drive one full
+        // discarded capture — exactly what PersistentRenderer::new() does — to
+        // settle the render-world sync after the scene swap, then reset capture
+        // state and run the real viewpoint sequence.
+        {
+            let warmup_timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
+            let warmup_start = std::time::Instant::now();
+            loop {
+                if warmup_start.elapsed() > warmup_timeout {
+                    return Err(BatchRenderError::TotalFailure(format!(
+                        "RenderSession::render warmup timed out after {}s",
+                        RENDER_TIMEOUT_SECS
+                    )));
+                }
+                self.app.update();
+                if self.app.world().resource::<HeadlessBatchSequence>().done {
+                    break;
+                }
+            }
+
+            // Reset capture state for the real pass, KEEPING scene/texture/material
+            // load progress so we don't re-wait for assets. capture_ready will
+            // re-fire immediately (gates already satisfied) and request_headless_capture
+            // re-enables the (now-disabled) ImageCopier.
+            let world = self.app.world_mut();
+            {
+                let mut state = world.resource_mut::<RenderState>();
+                state.capture_ready = false;
+                state.captured = false;
+                state.screenshot_requested = false;
+                state.rgba_data = None;
+                state.depth_data = None;
+                // The warmup sequence completing set exit_requested=true; clear it
+                // so the real sequence's extract/continue system isn't gated off.
+                state.exit_requested = false;
+            }
+            if let Ok(mut guard) = self.shared_rgba.0.lock() {
+                *guard = None;
+            }
+            if let Ok(mut guard) = self.shared_depth.0.lock() {
+                *guard = None;
+            }
+            // Re-seed camera to viewpoint 0 and install the real sequence.
+            let camera_entity = world
+                .query_filtered::<Entity, With<RenderCamera>>()
+                .iter(world)
+                .next();
+            if let Some(cam) = camera_entity {
+                if let Some(mut transform) = world.entity_mut(cam).get_mut::<Transform>() {
+                    *transform = viewpoints[0];
+                }
+            }
             world.insert_resource(HeadlessBatchSequence::new(viewpoints.clone()));
         }
 
-        // --- drive the capture loop ---
+        // --- drive the real capture loop ---
         let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
         let start = std::time::Instant::now();
         loop {
