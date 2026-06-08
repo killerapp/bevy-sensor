@@ -2880,69 +2880,11 @@ impl RenderSession {
                 }
             }
 
-            // Install a single-viewpoint WARMUP sequence (output discarded).
-            world.insert_resource(HeadlessBatchSequence::new(vec![viewpoints[0]]));
-        }
-
-        // --- warmup render (discarded) ---
-        // The despawn/respawn scene swap above leaves the new object's mesh
-        // extracted in the retained render world but NOT drawn into the color
-        // target on its first capture (verified: render_mesh_instances=1 at the
-        // capture frame, yet the captured RGBA is the clear color). Drive one full
-        // discarded capture — exactly what PersistentRenderer::new() does — to
-        // settle the render-world sync after the scene swap, then reset capture
-        // state and run the real viewpoint sequence.
-        {
-            let warmup_timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
-            let warmup_start = std::time::Instant::now();
-            loop {
-                if warmup_start.elapsed() > warmup_timeout {
-                    return Err(BatchRenderError::TotalFailure(format!(
-                        "RenderSession::render warmup timed out after {}s",
-                        RENDER_TIMEOUT_SECS
-                    )));
-                }
-                self.app.update();
-                if self.app.world().resource::<HeadlessBatchSequence>().done {
-                    break;
-                }
-            }
-
-            // Reset capture state for the real pass, KEEPING scene/texture/material
-            // load progress so we don't re-wait for assets. capture_ready will
-            // re-fire immediately (gates already satisfied) and request_headless_capture
-            // re-enables the (now-disabled) ImageCopier.
-            let world = self.app.world_mut();
-            {
-                let mut state = world.resource_mut::<RenderState>();
-                state.capture_ready = false;
-                state.captured = false;
-                state.screenshot_requested = false;
-                state.rgba_data = None;
-                state.depth_data = None;
-                state.capture_retries = 0;
-                state.prev_rgba = None;
-                state.prev_depth = None;
-                // The warmup sequence completing set exit_requested=true; clear it
-                // so the real sequence's extract/continue system isn't gated off.
-                state.exit_requested = false;
-            }
-            if let Ok(mut guard) = self.shared_rgba.0.lock() {
-                *guard = None;
-            }
-            if let Ok(mut guard) = self.shared_depth.0.lock() {
-                *guard = None;
-            }
-            // Re-seed camera to viewpoint 0 and install the real sequence.
-            let camera_entity = world
-                .query_filtered::<Entity, With<RenderCamera>>()
-                .iter(world)
-                .next();
-            if let Some(cam) = camera_entity {
-                if let Some(mut transform) = world.entity_mut(cam).get_mut::<Transform>() {
-                    *transform = viewpoints[0];
-                }
-            }
+            // Install the viewpoint sequence for this render() call. The robust
+            // settled-frame capture (reject blank/partial readbacks, retry until
+            // two consecutive readbacks match) absorbs the despawn/respawn
+            // render-world settle, so a separate discarded warmup pass is not
+            // needed and the per-object cost stays low.
             world.insert_resource(HeadlessBatchSequence::new(viewpoints.clone()));
         }
 
