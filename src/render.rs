@@ -39,13 +39,13 @@
 
 use bevy::app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin};
 use bevy::asset::{LoadState, RenderAssetUsages};
+use bevy::camera::RenderTarget;
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::query::QueryItem;
 use bevy::light::GlobalAmbientLight;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use bevy::camera::RenderTarget;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
@@ -124,6 +124,19 @@ const PERSISTENT_WARMUP_FRAMES: u32 = 3;
 #[inline]
 fn render_trace_enabled() -> bool {
     std::env::var("BEVY_SENSOR_RENDER_TRACE").is_ok()
+}
+
+/// Convert a filesystem path into a Bevy asset-path string.
+///
+/// `std::fs::canonicalize` on Windows returns a `\\?\C:\...` verbatim-prefixed
+/// path. Bevy's `AssetPath` parser cannot handle that prefix, so the asset
+/// would silently never load. Strip the verbatim prefix and normalize
+/// separators to `/` so the absolute path resolves through the default file
+/// asset source on every platform.
+fn fs_path_to_asset_string(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    let s = s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s);
+    s.replace('\\', "/")
 }
 
 /// Check if a display is available for windowed rendering.
@@ -606,7 +619,10 @@ impl Plugin for DepthReadbackPlugin {
         render_app.add_systems(ExtractSchedule, extract_depth_request);
 
         // Add system to process completed depth captures
-        render_app.add_systems(Render, collect_depth_captures.in_set(RenderSystems::Cleanup));
+        render_app.add_systems(
+            Render,
+            collect_depth_captures.in_set(RenderSystems::Cleanup),
+        );
 
         // Register the depth readback node in the render graph
         // Run after main pass completes (depth buffer is ready) but before tonemapping
@@ -1025,7 +1041,10 @@ impl Plugin for ImageCopyPlugin {
         render_app.init_resource::<PendingImageCaptureQueue>();
 
         render_app.add_systems(ExtractSchedule, extract_image_copiers);
-        render_app.add_systems(Render, collect_image_captures.in_set(RenderSystems::Cleanup));
+        render_app.add_systems(
+            Render,
+            collect_image_captures.in_set(RenderSystems::Cleanup),
+        );
 
         // Add image copy node to render graph (runs after camera driver)
         let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
@@ -1129,17 +1148,19 @@ pub fn render_headless(
     let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+        return Err(RenderError::MeshNotFound(fs_path_to_asset_string(
+            &mesh_path,
+        )));
     }
     if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
+        return Err(RenderError::TextureNotFound(fs_path_to_asset_string(
+            &texture_path,
+        )));
     }
 
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: fs_path_to_asset_string(&mesh_path),
+        texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
         config: config.clone(),
@@ -1237,17 +1258,19 @@ pub fn render_headless_sequence(
     let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+        return Err(RenderError::MeshNotFound(fs_path_to_asset_string(
+            &mesh_path,
+        )));
     }
     if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
+        return Err(RenderError::TextureNotFound(fs_path_to_asset_string(
+            &texture_path,
+        )));
     }
 
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: fs_path_to_asset_string(&mesh_path),
+        texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: viewpoints[0],
         object_rotation: object_rotation.clone(),
         config: config.clone(),
@@ -1262,6 +1285,13 @@ pub fn render_headless_sequence(
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .set(bevy::asset::AssetPlugin {
+                // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                // default (UnapprovedPathMode::Forbid → load() silently returns a
+                // default handle). YCB meshes load from absolute paths, so allow them.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
@@ -1272,6 +1302,17 @@ pub fn render_headless_sequence(
             .disable::<TerminalCtrlCHandlerPlugin>(),
     )
     .add_plugins(ObjPlugin)
+    // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+    // Scene spawning panics unless those component types are registered. The
+    // minimal headless plugin set doesn't register them, so do it explicitly.
+    .register_type::<Mesh3d>()
+    .register_type::<MeshMaterial3d<StandardMaterial>>()
+    .register_type::<bevy::prelude::Transform>()
+    .register_type::<bevy::prelude::GlobalTransform>()
+    .register_type::<bevy::transform::components::TransformTreeChanged>()
+    .register_type::<bevy::prelude::Visibility>()
+    .register_type::<bevy::prelude::InheritedVisibility>()
+    .register_type::<bevy::prelude::ViewVisibility>()
     .add_plugins(ImageCopyPlugin {
         shared_rgba: rgba_clone,
     })
@@ -1395,6 +1436,13 @@ fn build_headless_app(
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .set(bevy::asset::AssetPlugin {
+                // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                // default (UnapprovedPathMode::Forbid → load() silently returns a
+                // default handle). YCB meshes load from absolute paths, so allow them.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
@@ -1408,6 +1456,17 @@ fn build_headless_app(
         1.0 / 60.0,
     )))
     .add_plugins(ObjPlugin)
+    // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+    // Scene spawning panics unless those component types are registered. The
+    // minimal headless plugin set doesn't register them, so do it explicitly.
+    .register_type::<Mesh3d>()
+    .register_type::<MeshMaterial3d<StandardMaterial>>()
+    .register_type::<bevy::prelude::Transform>()
+    .register_type::<bevy::prelude::GlobalTransform>()
+    .register_type::<bevy::transform::components::TransformTreeChanged>()
+    .register_type::<bevy::prelude::Visibility>()
+    .register_type::<bevy::prelude::InheritedVisibility>()
+    .register_type::<bevy::prelude::ViewVisibility>()
     .add_plugins(ImageCopyPlugin {
         shared_rgba: shared_rgba.clone(),
     })
@@ -1785,8 +1844,9 @@ fn request_screenshot(
 
     // Spawn Screenshot entity with observer (Bevy 0.15+ API)
     println!("Requesting screenshot via Screenshot entity");
-    commands.spawn(Screenshot::primary_window()).observe(
-        move |trigger: On<ScreenshotCaptured>| {
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(move |trigger: On<ScreenshotCaptured>| {
             // ScreenshotCaptured derefs to Image
             let image: &Image = trigger.event();
 
@@ -1803,8 +1863,7 @@ fn request_screenshot(
             if let Ok(mut guard) = image_buffer.lock() {
                 *guard = Some((rgba_data, width, height));
             }
-        },
-    );
+        });
 
     state.screenshot_requested = true;
     println!("Screenshot requested");
@@ -2530,6 +2589,13 @@ impl RenderSession {
         let mut app = App::new();
         app.add_plugins(
             DefaultPlugins
+                .set(bevy::asset::AssetPlugin {
+                    // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                    // default (UnapprovedPathMode::Forbid → load() silently returns a
+                    // default handle). YCB meshes load from absolute paths, so allow them.
+                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -2540,6 +2606,17 @@ impl RenderSession {
                 .disable::<TerminalCtrlCHandlerPlugin>(),
         )
         .add_plugins(ObjPlugin)
+        // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+        // Scene spawning panics unless those component types are registered. The
+        // minimal headless plugin set doesn't register them, so do it explicitly.
+        .register_type::<Mesh3d>()
+        .register_type::<MeshMaterial3d<StandardMaterial>>()
+        .register_type::<bevy::prelude::Transform>()
+        .register_type::<bevy::prelude::GlobalTransform>()
+        .register_type::<bevy::transform::components::TransformTreeChanged>()
+        .register_type::<bevy::prelude::Visibility>()
+        .register_type::<bevy::prelude::InheritedVisibility>()
+        .register_type::<bevy::prelude::ViewVisibility>()
         .add_plugins(ImageCopyPlugin {
             shared_rgba: shared_rgba.clone(),
         })
@@ -2688,8 +2765,8 @@ impl RenderSession {
             // Update RenderRequest so the existing capture systems see the new
             // object paths, rotation, and camera transform (seeded from first vp).
             let new_request = RenderRequest {
-                mesh_path: mesh_path.display().to_string(),
-                texture_path: texture_path.display().to_string(),
+                mesh_path: fs_path_to_asset_string(&mesh_path),
+                texture_path: fs_path_to_asset_string(&texture_path),
                 camera_transform: viewpoints[0],
                 object_rotation: first.object_rotation.clone(),
                 config: self.render_config.clone(),
@@ -2699,9 +2776,10 @@ impl RenderSession {
             // Kick off asset loads and install the handles under the names the
             // existing `check_assets_loaded` system expects.
             let asset_server = world.resource::<AssetServer>().clone();
-            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
+            let scene_handle: Handle<Scene> =
+                asset_server.load(fs_path_to_asset_string(&mesh_path));
             let texture_handle: Handle<Image> =
-                asset_server.load(texture_path.display().to_string());
+                asset_server.load(fs_path_to_asset_string(&texture_path));
             world.insert_resource(LoadedScene(scene_handle.clone()));
             world.insert_resource(LoadedTexture(texture_handle));
 
@@ -2836,13 +2914,13 @@ impl PersistentRenderer {
         let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
         let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
         if !mesh_path.exists() {
-            return Err(crate::RenderError::MeshNotFound(
-                mesh_path.display().to_string(),
-            ));
+            return Err(crate::RenderError::MeshNotFound(fs_path_to_asset_string(
+                &mesh_path,
+            )));
         }
         if !texture_path.exists() {
             return Err(crate::RenderError::TextureNotFound(
-                texture_path.display().to_string(),
+                fs_path_to_asset_string(&texture_path),
             ));
         }
 
@@ -2852,6 +2930,13 @@ impl PersistentRenderer {
         let mut app = App::new();
         app.add_plugins(
             DefaultPlugins
+                .set(bevy::asset::AssetPlugin {
+                    // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                    // default (UnapprovedPathMode::Forbid → load() silently returns a
+                    // default handle). YCB meshes load from absolute paths, so allow them.
+                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -2862,6 +2947,17 @@ impl PersistentRenderer {
                 .disable::<TerminalCtrlCHandlerPlugin>(),
         )
         .add_plugins(ObjPlugin)
+        // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+        // Scene spawning panics unless those component types are registered. The
+        // minimal headless plugin set doesn't register them, so do it explicitly.
+        .register_type::<Mesh3d>()
+        .register_type::<MeshMaterial3d<StandardMaterial>>()
+        .register_type::<bevy::prelude::Transform>()
+        .register_type::<bevy::prelude::GlobalTransform>()
+        .register_type::<bevy::transform::components::TransformTreeChanged>()
+        .register_type::<bevy::prelude::Visibility>()
+        .register_type::<bevy::prelude::InheritedVisibility>()
+        .register_type::<bevy::prelude::ViewVisibility>()
         .add_plugins(ImageCopyPlugin {
             shared_rgba: shared_rgba.clone(),
         })
@@ -2900,8 +2996,8 @@ impl PersistentRenderer {
         // — its purpose is to pay PSO compilation and material application
         // upfront so the first user-facing render() is fast.
         let initial_request = RenderRequest {
-            mesh_path: mesh_path.display().to_string(),
-            texture_path: texture_path.display().to_string(),
+            mesh_path: fs_path_to_asset_string(&mesh_path),
+            texture_path: fs_path_to_asset_string(&texture_path),
             camera_transform: Transform::default(),
             object_rotation: ObjectRotation::identity(),
             config: render_config.clone(),
@@ -2910,9 +3006,10 @@ impl PersistentRenderer {
         {
             let world = app.world_mut();
             let asset_server = world.resource::<AssetServer>().clone();
-            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
+            let scene_handle: Handle<Scene> =
+                asset_server.load(fs_path_to_asset_string(&mesh_path));
             let texture_handle: Handle<Image> =
-                asset_server.load(texture_path.display().to_string());
+                asset_server.load(fs_path_to_asset_string(&texture_path));
             world.insert_resource(LoadedScene(scene_handle.clone()));
             world.insert_resource(LoadedTexture(texture_handle));
             world.insert_resource(initial_request);
@@ -3104,17 +3201,19 @@ pub fn render_to_files(
     let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+        return Err(RenderError::MeshNotFound(fs_path_to_asset_string(
+            &mesh_path,
+        )));
     }
     if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
+        return Err(RenderError::TextureNotFound(fs_path_to_asset_string(
+            &texture_path,
+        )));
     }
 
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: fs_path_to_asset_string(&mesh_path),
+        texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
         config: config.clone(),
