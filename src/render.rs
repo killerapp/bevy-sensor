@@ -2240,6 +2240,10 @@ fn check_headless_capture_ready(
     state.capture_retries += 1;
     // Bounded fallback so a genuinely-uniform scene (or persistent invalid
     // readback) still terminates instead of hanging to the watchdog.
+    // Generous bound: slow paths (e.g. RenderSession's retained-render-world
+    // settle after a scene swap) can take ~150 frames to produce a stable frame,
+    // so force-accepting at 150 would grab a partial frame and break parity. Only
+    // force as a true last resort to avoid hanging the watchdog.
     let force_accept = state.capture_retries > 150;
 
     // RGBA: accept the first non-blank frame. Uniform clear-color frames are
@@ -2275,9 +2279,10 @@ fn check_headless_capture_ready(
         let captured_depth = shared_depth.0.lock().ok().and_then(|g| g.clone());
         if let Some((depth_data, _w, _h)) = captured_depth {
             let far = request.config.far_plane as f64;
-            let has_foreground = depth_data
-                .iter()
-                .any(|&d| RenderOutput::is_foreground_depth(d, far));
+            // Require a real object-surface depth, not just any non-far value:
+            // near-plane garbage (~0.01) would otherwise be accepted but is not a
+            // valid surface, and downstream depth-validity checks require > 0.1m.
+            let has_foreground = depth_data.iter().any(|&d| d > 0.1 && d < far * 0.999);
             // Settled == identical to the previous depth readback.
             let stable = state.prev_depth.as_deref() == Some(depth_data.as_slice());
             if has_foreground && stable {
@@ -2478,6 +2483,12 @@ fn extract_and_continue_headless_batch(
         state.depth_data = None;
         state.image_width = 0;
         state.image_height = 0;
+        // Reset the per-capture settle/retry tracking too, otherwise it
+        // accumulates across viewpoints and force-accepts an unsettled frame for
+        // later viewpoints (breaking parity).
+        state.capture_retries = 0;
+        state.prev_rgba = None;
+        state.prev_depth = None;
 
         if let Some(t0) = t0 {
             eprintln!(
@@ -2909,6 +2920,9 @@ impl RenderSession {
                 state.screenshot_requested = false;
                 state.rgba_data = None;
                 state.depth_data = None;
+                state.capture_retries = 0;
+                state.prev_rgba = None;
+                state.prev_depth = None;
                 // The warmup sequence completing set exit_requested=true; clear it
                 // so the real sequence's extract/continue system isn't gated off.
                 state.exit_requested = false;
