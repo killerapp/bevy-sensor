@@ -168,6 +168,11 @@ struct RenderState {
     /// `capture_ready` on N frames of render-graph propagation rather than
     /// a legacy llvmpipe-era 60-frame wait.
     materials_applied_frame: u32,
+    /// `frame_count` when the texture finished loading. Capture waits a small
+    /// margin past this for GPU image preparation. The material (and therefore
+    /// the main-pass pipeline) is applied earlier, so by the time the texture is
+    /// ready the pipeline has already compiled.
+    texture_ready_frame: u32,
     capture_ready: bool,
     screenshot_requested: bool,
     captured: bool,
@@ -1781,7 +1786,13 @@ fn apply_materials(
     // Bevy 0.15+: Use MeshMaterial3d instead of Handle<StandardMaterial>
     mut mesh_query: Query<&mut MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
 ) {
-    if !state.scene_loaded || !state.texture_loaded || state.capture_ready {
+    // NOTE: we intentionally do NOT wait for `texture_loaded` before applying the
+    // material. The texture *handle* is valid immediately, so applying the material
+    // as soon as the mesh entities exist lets the main-pass `StandardMaterial`
+    // pipeline start compiling during the long async texture load. A late material
+    // swap (after texture load) would reset the pipeline and capture a blank color
+    // frame before it recompiled — the root cause of the 0.18 blank renders.
+    if !state.scene_loaded || state.capture_ready {
         return;
     }
 
@@ -1810,10 +1821,20 @@ fn apply_materials(
         state.materials_applied_frame = state.frame_count;
     }
 
-    // Two frames after material application is enough for the render graph
-    // to pick up the new material on native GPU. The previous 60-frame gate
-    // was a legacy llvmpipe software-rendering cushion.
-    if state.frame_count >= state.materials_applied_frame + 2 {
+    // Record the frame the texture finished loading (once).
+    if state.texture_loaded && state.texture_ready_frame == 0 {
+        state.texture_ready_frame = state.frame_count;
+    }
+
+    // Capture once the texture pixels are loaded (+ a small margin for GPU image
+    // preparation) AND the main-pass pipeline has had time to compile since the
+    // material was applied. Because the material is applied early, the pipeline is
+    // almost always ready well before the texture, so this resolves to a few frames
+    // after the texture loads — deterministic and fast (no 60/120-frame cushion).
+    let texture_ready =
+        state.texture_ready_frame != 0 && state.frame_count >= state.texture_ready_frame + 6;
+    let pipeline_ready = state.frame_count >= state.materials_applied_frame + 6;
+    if texture_ready && pipeline_ready {
         let was_ready = state.capture_ready;
         state.capture_ready = true;
         if render_trace_enabled() && !was_ready {
