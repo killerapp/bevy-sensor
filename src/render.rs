@@ -696,7 +696,8 @@ fn collect_depth_captures(
 
         // Poll the device until mapping completes
         loop {
-            let _ = render_device.poll(bevy::render::render_resource::PollType::Poll);
+            let _ =
+                render_device.poll(bevy::render::render_resource::PollType::wait_indefinitely());
             poll_iters += 1;
             match rx.try_recv() {
                 Ok(Ok(())) => {
@@ -954,7 +955,8 @@ fn collect_image_captures(
         let timeout = std::time::Duration::from_secs(10);
         let mut poll_iters: u32 = 0;
         loop {
-            let _ = render_device.poll(bevy::render::render_resource::PollType::Poll);
+            let _ =
+                render_device.poll(bevy::render::render_resource::PollType::wait_indefinitely());
             poll_iters += 1;
 
             if start.elapsed() > timeout {
