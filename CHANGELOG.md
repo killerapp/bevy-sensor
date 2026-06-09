@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/killerapp/bevy-sensor/compare/v0.5.6...v0.6.0) - 2026-06-09
+
+### Added
+
+- [**breaking**] upgrade Bevy 0.15 -> 0.18 ([#92](https://github.com/killerapp/bevy-sensor/pull/92))
+
+### Other
+
+- *(deps)* migrate ycbust 0.4.1 -> 0.5.1 (async-only + opt-in blocking) ([#94](https://github.com/killerapp/bevy-sensor/pull/94))
+- *(deps)* semver-compatible lockfile refresh after v0.5.6 ([#90](https://github.com/killerapp/bevy-sensor/pull/90))
+- *(deps)* remove unused direct reqwest dependency ([#91](https://github.com/killerapp/bevy-sensor/pull/91))
+
 ## [0.5.6](https://github.com/killerapp/bevy-sensor/compare/v0.5.5...v0.5.6) - 2026-06-07
 
 ### Added
