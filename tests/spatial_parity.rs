@@ -162,8 +162,13 @@ fn gpu_spatial_parity_center_pixel_unprojects_near_object_center() {
     let viewpoint = viewpoints[0];
     let config = RenderConfig::tbp_default();
 
-    let output = render_to_buffer(&object_dir, &viewpoint, &ObjectRotation::identity(), &config)
-        .expect("GPU render failed");
+    let output = render_to_buffer(
+        &object_dir,
+        &viewpoint,
+        &ObjectRotation::identity(),
+        &config,
+    )
+    .expect("GPU render failed");
 
     // The default (non-targeted) viewpoints orbit and look at the world origin.
     let target = Vec3::ZERO;
@@ -188,7 +193,11 @@ fn gpu_spatial_parity_center_pixel_unprojects_near_object_center() {
     let stats = depth_stats(&output);
     println!(
         "depth stats      = min {:.5} max {:.5} spread {:.5} distinct {} bg(far) {}",
-        stats.min, stats.max, stats.max - stats.min, stats.distinct, stats.far_count
+        stats.min,
+        stats.max,
+        stats.max - stats.min,
+        stats.distinct,
+        stats.far_count
     );
     println!("rgba distinct colors = {}", distinct_colors(&output));
 
@@ -250,7 +259,11 @@ fn gpu_spatial_parity_center_pixel_unprojects_near_object_center() {
     // --- Optional: strict numeric comparison against a captured 0.5.6 golden.
     match load_golden() {
         Some(golden) => {
-            let gw = Vec3::new(golden.center_world[0], golden.center_world[1], golden.center_world[2]);
+            let gw = Vec3::new(
+                golden.center_world[0],
+                golden.center_world[1],
+                golden.center_world[2],
+            );
             let delta = (center_world - gw).length();
             println!("golden_world     = {gw:?}  (delta = {delta:.6} m)");
             assert!(
@@ -284,7 +297,9 @@ fn print_depth_orientation(output: &RenderOutput) {
     let mut cols = [(0.0f64, 0usize); 3];
     for y in 0..h {
         for x in 0..w {
-            let Some(d) = output.get_depth(x, y) else { continue };
+            let Some(d) = output.get_depth(x, y) else {
+                continue;
+            };
             if !RenderOutput::is_foreground_depth(d, far) {
                 continue;
             }

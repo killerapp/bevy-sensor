@@ -830,8 +830,9 @@ fn collect_depth_captures(
                     // Convert reverse-Z NDC to linear depth (meters) using the
                     // view's actual projection matrix entries. See
                     // `convert_depth_to_linear_with_matrix`.
-                    let linear_depth =
-                        depth_helpers::convert_depth_to_linear_with_matrix(&ndc_depth, m22, m32, far);
+                    let linear_depth = depth_helpers::convert_depth_to_linear_with_matrix(
+                        &ndc_depth, m22, m32, far,
+                    );
 
                     // Store in shared buffer
                     if let Ok(mut guard) = shared.lock() {
