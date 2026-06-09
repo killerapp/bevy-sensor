@@ -13,8 +13,8 @@
 //!   runs the whole suite.
 //! - Pin format / layout / enum shape. Do NOT pin implementation behavior
 //!   (e.g. download ordering) — that's upstream's business.
-//! - Live network coverage lives in `ycbust_s3_integration.rs` behind the
-//!   `ycbust-s3` feature, `#[ignore]`d by default.
+//! - Live network coverage lives in `ycbust_network_smoke.rs`, `#[ignore]`d by
+//!   default. (S3 streaming was retired upstream in ycbust 0.5.0.)
 
 use std::path::Path;
 use ycbust::{
@@ -295,10 +295,8 @@ fn ycbust_contract_error_variants_matchable() {
             YcbError::HttpStatus { .. } => "http_status",
             YcbError::Extraction { .. } => "extraction",
             YcbError::Io(_) => "io",
-            YcbError::Integrity { .. } => "integrity",
             YcbError::InvalidResponse(_) => "invalid_response",
             YcbError::UnsafeArchive(_) => "unsafe_archive",
-            YcbError::Other(_) => "other",
             _ => "unknown_non_exhaustive",
         }
     }
@@ -308,11 +306,8 @@ fn ycbust_contract_error_variants_matchable() {
     };
     assert_eq!(classify(http), "http_status");
 
-    let integrity = YcbError::Integrity {
-        path: "/tmp/foo.tgz".into(),
-        reason: "expected 1024, got 512".into(),
-    };
-    assert_eq!(classify(integrity), "integrity");
+    let unsafe_archive = YcbError::UnsafeArchive("path traversal".into());
+    assert_eq!(classify(unsafe_archive), "unsafe_archive");
 }
 
 #[test]
