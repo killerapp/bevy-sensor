@@ -60,7 +60,7 @@ use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
-use bevy::render::view::{Hdr, ViewDepthTexture};
+use bevy::render::view::{ExtractedView, Hdr, ViewDepthTexture};
 use bevy::render::{Extract, Render, RenderApp, RenderSystems};
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_obj::ObjPlugin;
@@ -236,12 +236,19 @@ struct DepthCaptureRequest {
     far: f32,
 }
 
-/// Pending depth capture info for async processing
+/// Pending depth capture info for async processing.
+///
+/// `m22`/`m32` are the relevant entries of the view's reverse-Z projection
+/// matrix (`clip_from_view`), captured at copy time so the CPU-side
+/// linearization matches the exact projection the GPU rendered with — including
+/// whatever near plane Bevy actually used (which is not necessarily
+/// `RenderConfig::near_plane`; Bevy 0.18 renders this camera with near = 0.1).
 struct PendingDepthCapture {
     buffer: Buffer,
     width: u32,
     height: u32,
-    near: f32,
+    m22: f32,
+    m32: f32,
     far: f32,
 }
 
@@ -282,6 +289,12 @@ mod depth_helpers {
     /// - At near plane (z = near): ndc = 1
     /// - At far plane (z = far): ndc = 0
     /// - linear = far / (1 + ndc * (far/near - 1))
+    ///
+    /// Superseded in the render path by [`ndc_to_linear_with_matrix`], which
+    /// reads the actual projection near from the view matrix instead of trusting
+    /// a passed-in near (the source of the #92 10x depth error). Retained for its
+    /// tests and as a reference formula.
+    #[allow(dead_code)]
     pub fn reverse_z_to_linear_depth(ndc_depth: f32, near: f32, far: f32) -> f32 {
         // Handle edge cases
         if ndc_depth <= 0.0 {
@@ -317,11 +330,57 @@ mod depth_helpers {
         depth_values
     }
 
-    /// Convert all NDC depth values to linear meters (as f64 for TBP precision)
+    /// Convert all NDC depth values to linear meters (as f64 for TBP precision).
+    /// Superseded by [`convert_depth_to_linear_with_matrix`]; retained for tests.
+    #[allow(dead_code)]
     pub fn convert_depth_to_linear(raw_depth: &[f32], near: f32, far: f32) -> Vec<f64> {
         raw_depth
             .iter()
             .map(|&ndc| reverse_z_to_linear_depth(ndc, near, far) as f64)
+            .collect()
+    }
+
+    /// Linearize a reverse-Z NDC depth using the view's actual projection matrix,
+    /// rather than a hand-supplied near/far.
+    ///
+    /// For a perspective right-handed projection, the relevant clip-space rows are
+    /// `clip_z = m22 * z + m32` and `clip_w = -z` (camera looks down -Z), so
+    /// `ndc = clip_z / clip_w = (m22*z + m32) / (-z)`. Solving for the positive
+    /// view-space distance `d = -z` gives **`d = m32 / (ndc + m22)`**. This holds
+    /// for both finite and infinite reverse-Z and is correct regardless of which
+    /// near plane the renderer actually used — the previous fixed-near formula
+    /// produced depths 10x too small on Bevy 0.18, which renders this camera with
+    /// near = 0.1 even though `RenderConfig::near_plane` is 0.01 (issue #86/#92).
+    ///
+    /// `m22 = clip_from_view[col=2][row=2]`, `m32 = clip_from_view[col=3][row=2]`.
+    /// `ndc <= 0` is the reverse-Z far plane (background) and maps to `far`.
+    pub fn ndc_to_linear_with_matrix(ndc: f32, m22: f32, m32: f32, far: f32) -> f32 {
+        if ndc <= 0.0 {
+            return far; // background / at-or-beyond far plane in reverse-Z
+        }
+        let denom = ndc + m22;
+        if denom.abs() <= f32::EPSILON {
+            return far;
+        }
+        let linear = m32 / denom;
+        if !linear.is_finite() || linear <= 0.0 {
+            far
+        } else {
+            linear.min(far)
+        }
+    }
+
+    /// Convert all NDC depth values to linear meters using the view projection
+    /// matrix (f64 for TBP precision). See [`ndc_to_linear_with_matrix`].
+    pub fn convert_depth_to_linear_with_matrix(
+        raw_depth: &[f32],
+        m22: f32,
+        m32: f32,
+        far: f32,
+    ) -> Vec<f64> {
+        raw_depth
+            .iter()
+            .map(|&ndc| ndc_to_linear_with_matrix(ndc, m22, m32, far) as f64)
             .collect()
     }
 
@@ -427,6 +486,36 @@ mod depth_helpers {
         }
 
         #[test]
+        fn test_ndc_to_linear_with_matrix_infinite_reverse_z() {
+            // Infinite reverse-Z (Bevy `perspective_infinite_reverse_rh`):
+            // m22 = 0, m32 = near. d = near / ndc.
+            let (m22, m32, far) = (0.0f32, 0.1f32, 10.0f32);
+
+            // The exact regression from #92: ndc 0.366504 must linearize to
+            // ~0.273 m (near 0.1), NOT ~0.027 m (the old fixed near = 0.01).
+            let d = ndc_to_linear_with_matrix(0.366504, m22, m32, far);
+            assert!((d as f64 - 0.272849).abs() < 1e-4, "got {d}");
+
+            // Background (reverse-Z far plane) and clamping.
+            assert_eq!(ndc_to_linear_with_matrix(0.0, m22, m32, far), far);
+            assert_eq!(ndc_to_linear_with_matrix(-0.5, m22, m32, far), far);
+            // Very small ndc -> very far -> clamped to far.
+            assert_eq!(ndc_to_linear_with_matrix(1e-9, m22, m32, far), far);
+        }
+
+        #[test]
+        fn test_ndc_to_linear_with_matrix_finite_reverse_z() {
+            // Finite reverse-Z maps near->ndc 1, far->ndc 0. Construct the matrix
+            // entries for near=0.5, far=20: m22 = near/(far-near), m32 = far*m22.
+            let (near, far) = (0.5f32, 20.0f32);
+            let m22 = near / (far - near);
+            let m32 = far * m22;
+            // ndc = 1 -> near; ndc = 0 -> far (background sentinel also returns far).
+            assert!((ndc_to_linear_with_matrix(1.0, m22, m32, far) - near).abs() < 1e-4);
+            assert_eq!(ndc_to_linear_with_matrix(0.0, m22, m32, far), far);
+        }
+
+        #[test]
         fn test_convert_depth_to_linear_batch() {
             let near = 0.01f32;
             let far = 10.0f32;
@@ -505,13 +594,17 @@ struct DepthReadbackLabel;
 struct DepthReadbackNode;
 
 impl ViewNode for DepthReadbackNode {
-    type ViewQuery = (&'static ViewDepthTexture, &'static ExtractedCamera);
+    type ViewQuery = (
+        &'static ViewDepthTexture,
+        &'static ExtractedCamera,
+        &'static ExtractedView,
+    );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_depth_texture, camera): QueryItem<'w, '_, Self::ViewQuery>,
+        (view_depth_texture, camera, view): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let trace = render_trace_enabled();
@@ -577,13 +670,18 @@ impl ViewNode for DepthReadbackNode {
             },
         );
 
-        // Push to queue for async processing (queue is Arc<Mutex<Vec>>)
+        // Push to queue for async processing (queue is Arc<Mutex<Vec>>).
+        // Capture the projection-matrix entries used for linearization: for a
+        // perspective RH matrix, clip_z = m22*z + m32 and clip_w = -z, so the
+        // positive view-space distance is d = m32 / (ndc + m22).
+        let clip_from_view = view.clip_from_view;
         if let Ok(mut pending) = queue.0.lock() {
             pending.push(PendingDepthCapture {
                 buffer: staging_buffer,
                 width,
                 height,
-                near: request.near,
+                m22: clip_from_view.z_axis.z,
+                m32: clip_from_view.w_axis.z,
                 far: request.far,
             });
         }
@@ -695,7 +793,8 @@ fn collect_depth_captures(
     for pending in pending_captures {
         let width = pending.width;
         let height = pending.height;
-        let near = pending.near;
+        let m22 = pending.m22;
+        let m32 = pending.m32;
         let far = pending.far;
         let buffer = pending.buffer;
         let shared = shared_depth.0.clone();
@@ -728,9 +827,11 @@ fn collect_depth_captures(
                     drop(data);
                     buffer.unmap();
 
-                    // Convert from reverse-Z NDC to linear depth in meters
+                    // Convert reverse-Z NDC to linear depth (meters) using the
+                    // view's actual projection matrix entries. See
+                    // `convert_depth_to_linear_with_matrix`.
                     let linear_depth =
-                        depth_helpers::convert_depth_to_linear(&ndc_depth, near, far);
+                        depth_helpers::convert_depth_to_linear_with_matrix(&ndc_depth, m22, m32, far);
 
                     // Store in shared buffer
                     if let Ok(mut guard) = shared.lock() {
