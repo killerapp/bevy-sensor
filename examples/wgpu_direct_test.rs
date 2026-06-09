@@ -77,15 +77,12 @@ fn main() {
 
             let result = pollster::block_on(async {
                 adapter
-                    .request_device(
-                        &wgpu::DeviceDescriptor {
-                            label: Some("test device"),
-                            required_features: wgpu::Features::empty(),
-                            required_limits: wgpu::Limits::default(),
-                            ..Default::default()
-                        },
-                        None,
-                    )
+                    .request_device(&wgpu::DeviceDescriptor {
+                        label: Some("test device"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::default(),
+                        ..Default::default()
+                    })
                     .await
             });
 
@@ -132,21 +129,18 @@ fn main() {
         });
 
         match gl_adapter {
-            Some(adapter) => {
+            Ok(adapter) => {
                 let info = adapter.get_info();
                 println!("GL adapter found: {} ({:?})", info.name, info.device_type);
 
                 let result = pollster::block_on(async {
                     adapter
-                        .request_device(
-                            &wgpu::DeviceDescriptor {
-                                label: Some("gl device"),
-                                required_features: wgpu::Features::empty(),
-                                required_limits: wgpu::Limits::default(),
-                                ..Default::default()
-                            },
-                            None,
-                        )
+                        .request_device(&wgpu::DeviceDescriptor {
+                            label: Some("gl device"),
+                            required_features: wgpu::Features::empty(),
+                            required_limits: wgpu::Limits::default(),
+                            ..Default::default()
+                        })
                         .await
                 });
 
@@ -161,7 +155,8 @@ fn main() {
                     }
                 }
             }
-            None => println!("❌ No GL adapter found"),
+            // wgpu 27: `request_adapter` returns `Result` instead of `Option`.
+            Err(e) => println!("❌ No GL adapter found: {:?}", e),
         }
     }
 

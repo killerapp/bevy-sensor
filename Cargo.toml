@@ -14,7 +14,13 @@ exclude = [".github", "target", "captures", "assets", "WEBGPU_RESEARCH.md", "CLA
 [dependencies]
 # Disable default features to avoid system dependencies (alsa, libudev)
 # Enable only what's needed for headless rendering
-bevy = { version = "0.15.3", default-features = false, features = [
+bevy = { version = "0.18", default-features = false, features = [
+    # Bevy 0.16+ is no_std-capable; with default-features off we MUST opt back
+    # into std + multi-threaded task pools, otherwise the IoTaskPool has no
+    # worker threads and async asset loads never run (get_load_state stays None
+    # forever and headless renders hang). See issue #86 migration notes.
+    "std",
+    "multi_threaded",
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_pbr",
@@ -26,9 +32,9 @@ bevy = { version = "0.15.3", default-features = false, features = [
     "x11",             # For windowing on Linux
     "tonemapping_luts", # Required for tonemapping
     "ktx2",            # Required for some textures
-    "zstd",            # Compression for ktx2
+    "zstd_rust",       # ktx2 zstd supercompression (split into zstd_rust/zstd_c in 0.18)
 ] }
-bevy_obj = { version = "0.15", features = ["scene"] }
+bevy_obj = { version = "0.18", features = ["scene"] }
 tobj = "4.0"
 ycbust = { version = "0.5.1", features = ["blocking"] }
 image = "0.25"  # For saving PNG/depth images
@@ -42,7 +48,7 @@ default = []
 [dev-dependencies]
 tempfile = "3.10"
 pollster = "0.4.0"
-wgpu = "24.0"
+wgpu = "27.0"
 # For `ycbust_contract_error_from_and_into_anyhow` — verifies the bidirectional
 # `YcbError` ↔ `anyhow::Error` conversion upstream guarantees.
 anyhow = "1.0"

@@ -38,28 +38,30 @@
 //! normally exit.
 
 use bevy::app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin};
-use bevy::asset::LoadState;
+use bevy::asset::{LoadState, RenderAssetUsages};
+use bevy::camera::RenderTarget;
 use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::query::QueryItem;
+use bevy::light::GlobalAmbientLight;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use bevy::render::camera::{ExtractedCamera, RenderTarget};
-use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
+use bevy::render::camera::ExtractedCamera;
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner,
+    Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, ImageCopyBuffer,
-    ImageCopyTexture, ImageDataLayout, MapMode, Origin3d, TextureAspect, TextureDimension,
-    TextureFormat, TextureUsages,
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, Origin3d,
+    TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
+    TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
-use bevy::render::view::ViewDepthTexture;
-use bevy::render::{Extract, Render, RenderApp, RenderSet};
+use bevy::render::view::{ExtractedView, Hdr, ViewDepthTexture};
+use bevy::render::{Extract, Render, RenderApp, RenderSystems};
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_obj::ObjPlugin;
 use std::fs::File;
@@ -124,6 +126,19 @@ fn render_trace_enabled() -> bool {
     std::env::var("BEVY_SENSOR_RENDER_TRACE").is_ok()
 }
 
+/// Convert a filesystem path into a Bevy asset-path string.
+///
+/// `std::fs::canonicalize` on Windows returns a `\\?\C:\...` verbatim-prefixed
+/// path. Bevy's `AssetPath` parser cannot handle that prefix, so the asset
+/// would silently never load. Strip the verbatim prefix and normalize
+/// separators to `/` so the absolute path resolves through the default file
+/// asset source on every platform.
+fn fs_path_to_asset_string(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    let s = s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s);
+    s.replace('\\', "/")
+}
+
 /// Check if a display is available for windowed rendering.
 ///
 /// Returns true if DISPLAY or WAYLAND_DISPLAY environment variable is set.
@@ -153,8 +168,26 @@ struct RenderState {
     /// `capture_ready` on N frames of render-graph propagation rather than
     /// a legacy llvmpipe-era 60-frame wait.
     materials_applied_frame: u32,
+    /// `frame_count` when the texture finished loading. Capture waits a small
+    /// margin past this for GPU image preparation. The material (and therefore
+    /// the main-pass pipeline) is applied earlier, so by the time the texture is
+    /// ready the pipeline has already compiled.
+    texture_ready_frame: u32,
     capture_ready: bool,
     screenshot_requested: bool,
+    /// Number of frames spent waiting for a *valid* (non-blank / valid-depth)
+    /// readback. The one-shot GPU capture is nondeterministic and occasionally
+    /// reads a uniform clear-color frame; we reject those and keep capturing
+    /// until a real frame lands, bounded by this counter.
+    capture_retries: u32,
+    /// Previous frame's RGBA readback. The capture is accepted only once two
+    /// consecutive readbacks are identical (the render has settled), so partial
+    /// in-progress frames aren't captured and every render path yields the same
+    /// fully-drawn image (required for byte-exact cross-path parity).
+    prev_rgba: Option<Vec<u8>>,
+    /// Previous frame's depth readback, for the same settle-detection as
+    /// `prev_rgba` (depth parity is asserted to ~1e-9, i.e. bit-exact).
+    prev_depth: Option<Vec<f64>>,
     captured: bool,
     exit_requested: bool,
     #[allow(dead_code)]
@@ -203,12 +236,19 @@ struct DepthCaptureRequest {
     far: f32,
 }
 
-/// Pending depth capture info for async processing
+/// Pending depth capture info for async processing.
+///
+/// `m22`/`m32` are the relevant entries of the view's reverse-Z projection
+/// matrix (`clip_from_view`), captured at copy time so the CPU-side
+/// linearization matches the exact projection the GPU rendered with — including
+/// whatever near plane Bevy actually used (which is not necessarily
+/// `RenderConfig::near_plane`; Bevy 0.18 renders this camera with near = 0.1).
 struct PendingDepthCapture {
     buffer: Buffer,
     width: u32,
     height: u32,
-    near: f32,
+    m22: f32,
+    m32: f32,
     far: f32,
 }
 
@@ -249,6 +289,12 @@ mod depth_helpers {
     /// - At near plane (z = near): ndc = 1
     /// - At far plane (z = far): ndc = 0
     /// - linear = far / (1 + ndc * (far/near - 1))
+    ///
+    /// Superseded in the render path by [`ndc_to_linear_with_matrix`], which
+    /// reads the actual projection near from the view matrix instead of trusting
+    /// a passed-in near (the source of the #92 10x depth error). Retained for its
+    /// tests and as a reference formula.
+    #[allow(dead_code)]
     pub fn reverse_z_to_linear_depth(ndc_depth: f32, near: f32, far: f32) -> f32 {
         // Handle edge cases
         if ndc_depth <= 0.0 {
@@ -284,11 +330,57 @@ mod depth_helpers {
         depth_values
     }
 
-    /// Convert all NDC depth values to linear meters (as f64 for TBP precision)
+    /// Convert all NDC depth values to linear meters (as f64 for TBP precision).
+    /// Superseded by [`convert_depth_to_linear_with_matrix`]; retained for tests.
+    #[allow(dead_code)]
     pub fn convert_depth_to_linear(raw_depth: &[f32], near: f32, far: f32) -> Vec<f64> {
         raw_depth
             .iter()
             .map(|&ndc| reverse_z_to_linear_depth(ndc, near, far) as f64)
+            .collect()
+    }
+
+    /// Linearize a reverse-Z NDC depth using the view's actual projection matrix,
+    /// rather than a hand-supplied near/far.
+    ///
+    /// For a perspective right-handed projection, the relevant clip-space rows are
+    /// `clip_z = m22 * z + m32` and `clip_w = -z` (camera looks down -Z), so
+    /// `ndc = clip_z / clip_w = (m22*z + m32) / (-z)`. Solving for the positive
+    /// view-space distance `d = -z` gives **`d = m32 / (ndc + m22)`**. This holds
+    /// for both finite and infinite reverse-Z and is correct regardless of which
+    /// near plane the renderer actually used — the previous fixed-near formula
+    /// produced depths 10x too small on Bevy 0.18, which renders this camera with
+    /// near = 0.1 even though `RenderConfig::near_plane` is 0.01 (issue #86/#92).
+    ///
+    /// `m22 = clip_from_view[col=2][row=2]`, `m32 = clip_from_view[col=3][row=2]`.
+    /// `ndc <= 0` is the reverse-Z far plane (background) and maps to `far`.
+    pub fn ndc_to_linear_with_matrix(ndc: f32, m22: f32, m32: f32, far: f32) -> f32 {
+        if ndc <= 0.0 {
+            return far; // background / at-or-beyond far plane in reverse-Z
+        }
+        let denom = ndc + m22;
+        if denom.abs() <= f32::EPSILON {
+            return far;
+        }
+        let linear = m32 / denom;
+        if !linear.is_finite() || linear <= 0.0 {
+            far
+        } else {
+            linear.min(far)
+        }
+    }
+
+    /// Convert all NDC depth values to linear meters using the view projection
+    /// matrix (f64 for TBP precision). See [`ndc_to_linear_with_matrix`].
+    pub fn convert_depth_to_linear_with_matrix(
+        raw_depth: &[f32],
+        m22: f32,
+        m32: f32,
+        far: f32,
+    ) -> Vec<f64> {
+        raw_depth
+            .iter()
+            .map(|&ndc| ndc_to_linear_with_matrix(ndc, m22, m32, far) as f64)
             .collect()
     }
 
@@ -394,6 +486,36 @@ mod depth_helpers {
         }
 
         #[test]
+        fn test_ndc_to_linear_with_matrix_infinite_reverse_z() {
+            // Infinite reverse-Z (Bevy `perspective_infinite_reverse_rh`):
+            // m22 = 0, m32 = near. d = near / ndc.
+            let (m22, m32, far) = (0.0f32, 0.1f32, 10.0f32);
+
+            // The exact regression from #92: ndc 0.366504 must linearize to
+            // ~0.273 m (near 0.1), NOT ~0.027 m (the old fixed near = 0.01).
+            let d = ndc_to_linear_with_matrix(0.366504, m22, m32, far);
+            assert!((d as f64 - 0.272849).abs() < 1e-4, "got {d}");
+
+            // Background (reverse-Z far plane) and clamping.
+            assert_eq!(ndc_to_linear_with_matrix(0.0, m22, m32, far), far);
+            assert_eq!(ndc_to_linear_with_matrix(-0.5, m22, m32, far), far);
+            // Very small ndc -> very far -> clamped to far.
+            assert_eq!(ndc_to_linear_with_matrix(1e-9, m22, m32, far), far);
+        }
+
+        #[test]
+        fn test_ndc_to_linear_with_matrix_finite_reverse_z() {
+            // Finite reverse-Z maps near->ndc 1, far->ndc 0. Construct the matrix
+            // entries for near=0.5, far=20: m22 = near/(far-near), m32 = far*m22.
+            let (near, far) = (0.5f32, 20.0f32);
+            let m22 = near / (far - near);
+            let m32 = far * m22;
+            // ndc = 1 -> near; ndc = 0 -> far (background sentinel also returns far).
+            assert!((ndc_to_linear_with_matrix(1.0, m22, m32, far) - near).abs() < 1e-4);
+            assert_eq!(ndc_to_linear_with_matrix(0.0, m22, m32, far), far);
+        }
+
+        #[test]
         fn test_convert_depth_to_linear_batch() {
             let near = 0.01f32;
             let far = 10.0f32;
@@ -472,13 +594,17 @@ struct DepthReadbackLabel;
 struct DepthReadbackNode;
 
 impl ViewNode for DepthReadbackNode {
-    type ViewQuery = (&'static ViewDepthTexture, &'static ExtractedCamera);
+    type ViewQuery = (
+        &'static ViewDepthTexture,
+        &'static ExtractedCamera,
+        &'static ExtractedView,
+    );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_depth_texture, camera): QueryItem<'w, Self::ViewQuery>,
+        (view_depth_texture, camera, view): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let trace = render_trace_enabled();
@@ -523,15 +649,15 @@ impl ViewNode for DepthReadbackNode {
         // Copy depth texture to staging buffer
         let encoder = render_context.command_encoder();
         encoder.copy_texture_to_buffer(
-            ImageCopyTexture {
+            TexelCopyTextureInfo {
                 texture: &view_depth_texture.texture,
                 mip_level: 0,
                 origin: Origin3d::ZERO,
                 aspect: TextureAspect::DepthOnly,
             },
-            ImageCopyBuffer {
+            TexelCopyBufferInfo {
                 buffer: &staging_buffer,
-                layout: ImageDataLayout {
+                layout: TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),
@@ -544,13 +670,18 @@ impl ViewNode for DepthReadbackNode {
             },
         );
 
-        // Push to queue for async processing (queue is Arc<Mutex<Vec>>)
+        // Push to queue for async processing (queue is Arc<Mutex<Vec>>).
+        // Capture the projection-matrix entries used for linearization: for a
+        // perspective RH matrix, clip_z = m22*z + m32 and clip_w = -z, so the
+        // positive view-space distance is d = m32 / (ndc + m22).
+        let clip_from_view = view.clip_from_view;
         if let Ok(mut pending) = queue.0.lock() {
             pending.push(PendingDepthCapture {
                 buffer: staging_buffer,
                 width,
                 height,
-                near: request.near,
+                m22: clip_from_view.z_axis.z,
+                m32: clip_from_view.w_axis.z,
                 far: request.far,
             });
         }
@@ -604,7 +735,10 @@ impl Plugin for DepthReadbackPlugin {
         render_app.add_systems(ExtractSchedule, extract_depth_request);
 
         // Add system to process completed depth captures
-        render_app.add_systems(Render, collect_depth_captures.in_set(RenderSet::Cleanup));
+        render_app.add_systems(
+            Render,
+            collect_depth_captures.in_set(RenderSystems::Cleanup),
+        );
 
         // Register the depth readback node in the render graph
         // Run after main pass completes (depth buffer is ready) but before tonemapping
@@ -659,7 +793,8 @@ fn collect_depth_captures(
     for pending in pending_captures {
         let width = pending.width;
         let height = pending.height;
-        let near = pending.near;
+        let m22 = pending.m22;
+        let m32 = pending.m32;
         let far = pending.far;
         let buffer = pending.buffer;
         let shared = shared_depth.0.clone();
@@ -678,7 +813,8 @@ fn collect_depth_captures(
 
         // Poll the device until mapping completes
         loop {
-            render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            let _ =
+                render_device.poll(bevy::render::render_resource::PollType::wait_indefinitely());
             poll_iters += 1;
             match rx.try_recv() {
                 Ok(Ok(())) => {
@@ -691,9 +827,12 @@ fn collect_depth_captures(
                     drop(data);
                     buffer.unmap();
 
-                    // Convert from reverse-Z NDC to linear depth in meters
-                    let linear_depth =
-                        depth_helpers::convert_depth_to_linear(&ndc_depth, near, far);
+                    // Convert reverse-Z NDC to linear depth (meters) using the
+                    // view's actual projection matrix entries. See
+                    // `convert_depth_to_linear_with_matrix`.
+                    let linear_depth = depth_helpers::convert_depth_to_linear_with_matrix(
+                        &ndc_depth, m22, m32, far,
+                    );
 
                     // Store in shared buffer
                     if let Ok(mut guard) = shared.lock() {
@@ -812,8 +951,8 @@ impl Node for ImageCopyDriver {
                 continue;
             };
 
-            let width = gpu_image.size.x;
-            let height = gpu_image.size.y;
+            let width = gpu_image.size.width;
+            let height = gpu_image.size.height;
 
             // Calculate padded bytes per row (wgpu requires 256-byte alignment)
             let block_dimensions = gpu_image.texture_format.block_dimensions();
@@ -846,9 +985,9 @@ impl Node for ImageCopyDriver {
             // Copy texture to buffer
             encoder.copy_texture_to_buffer(
                 gpu_image.texture.as_image_copy(),
-                ImageCopyBuffer {
+                TexelCopyBufferInfo {
                     buffer: &staging_buffer,
-                    layout: ImageDataLayout {
+                    layout: TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(padded_bytes_per_row as u32),
                         rows_per_image: None,
@@ -936,7 +1075,8 @@ fn collect_image_captures(
         let timeout = std::time::Duration::from_secs(10);
         let mut poll_iters: u32 = 0;
         loop {
-            render_device.poll(bevy::render::render_resource::Maintain::Poll);
+            let _ =
+                render_device.poll(bevy::render::render_resource::PollType::wait_indefinitely());
             poll_iters += 1;
 
             if start.elapsed() > timeout {
@@ -1023,7 +1163,10 @@ impl Plugin for ImageCopyPlugin {
         render_app.init_resource::<PendingImageCaptureQueue>();
 
         render_app.add_systems(ExtractSchedule, extract_image_copiers);
-        render_app.add_systems(Render, collect_image_captures.in_set(RenderSet::Cleanup));
+        render_app.add_systems(
+            Render,
+            collect_image_captures.in_set(RenderSystems::Cleanup),
+        );
 
         // Add image copy node to render graph (runs after camera driver)
         let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
@@ -1127,17 +1270,19 @@ pub fn render_headless(
     let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+        return Err(RenderError::MeshNotFound(fs_path_to_asset_string(
+            &mesh_path,
+        )));
     }
     if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
+        return Err(RenderError::TextureNotFound(fs_path_to_asset_string(
+            &texture_path,
+        )));
     }
 
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: fs_path_to_asset_string(&mesh_path),
+        texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
         config: config.clone(),
@@ -1235,17 +1380,19 @@ pub fn render_headless_sequence(
     let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+        return Err(RenderError::MeshNotFound(fs_path_to_asset_string(
+            &mesh_path,
+        )));
     }
     if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
+        return Err(RenderError::TextureNotFound(fs_path_to_asset_string(
+            &texture_path,
+        )));
     }
 
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: fs_path_to_asset_string(&mesh_path),
+        texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: viewpoints[0],
         object_rotation: object_rotation.clone(),
         config: config.clone(),
@@ -1260,6 +1407,13 @@ pub fn render_headless_sequence(
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .set(bevy::asset::AssetPlugin {
+                // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                // default (UnapprovedPathMode::Forbid → load() silently returns a
+                // default handle). YCB meshes load from absolute paths, so allow them.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
@@ -1270,6 +1424,17 @@ pub fn render_headless_sequence(
             .disable::<TerminalCtrlCHandlerPlugin>(),
     )
     .add_plugins(ObjPlugin)
+    // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+    // Scene spawning panics unless those component types are registered. The
+    // minimal headless plugin set doesn't register them, so do it explicitly.
+    .register_type::<Mesh3d>()
+    .register_type::<MeshMaterial3d<StandardMaterial>>()
+    .register_type::<bevy::prelude::Transform>()
+    .register_type::<bevy::prelude::GlobalTransform>()
+    .register_type::<bevy::transform::components::TransformTreeChanged>()
+    .register_type::<bevy::prelude::Visibility>()
+    .register_type::<bevy::prelude::InheritedVisibility>()
+    .register_type::<bevy::prelude::ViewVisibility>()
     .add_plugins(ImageCopyPlugin {
         shared_rgba: rgba_clone,
     })
@@ -1393,6 +1558,13 @@ fn build_headless_app(
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .set(bevy::asset::AssetPlugin {
+                // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                // default (UnapprovedPathMode::Forbid → load() silently returns a
+                // default handle). YCB meshes load from absolute paths, so allow them.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
@@ -1406,6 +1578,17 @@ fn build_headless_app(
         1.0 / 60.0,
     )))
     .add_plugins(ObjPlugin)
+    // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+    // Scene spawning panics unless those component types are registered. The
+    // minimal headless plugin set doesn't register them, so do it explicitly.
+    .register_type::<Mesh3d>()
+    .register_type::<MeshMaterial3d<StandardMaterial>>()
+    .register_type::<bevy::prelude::Transform>()
+    .register_type::<bevy::prelude::GlobalTransform>()
+    .register_type::<bevy::transform::components::TransformTreeChanged>()
+    .register_type::<bevy::prelude::Visibility>()
+    .register_type::<bevy::prelude::InheritedVisibility>()
+    .register_type::<bevy::prelude::ViewVisibility>()
     .add_plugins(ImageCopyPlugin {
         shared_rgba: shared_rgba.clone(),
     })
@@ -1575,10 +1758,8 @@ fn setup_scene(
     let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
         Projection::Perspective(PerspectiveProjection {
             fov,
             near: request.config.near_plane,
@@ -1593,11 +1774,13 @@ fn setup_scene(
         RenderCamera,
     ));
 
-    // Ambient light (from config)
+    // Ambient light (from config). In Bevy 0.18 the global ambient light is the
+    // `GlobalAmbientLight` resource (the `AmbientLight` type became a per-camera component).
     let lighting = &request.config.lighting;
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: lighting.ambient_brightness,
+        ..default()
     });
 
     // Key light (from config) - Bevy 0.15+ uses PointLight component directly
@@ -1718,7 +1901,13 @@ fn apply_materials(
     // Bevy 0.15+: Use MeshMaterial3d instead of Handle<StandardMaterial>
     mut mesh_query: Query<&mut MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
 ) {
-    if !state.scene_loaded || !state.texture_loaded || state.capture_ready {
+    // NOTE: we intentionally do NOT wait for `texture_loaded` before applying the
+    // material. The texture *handle* is valid immediately, so applying the material
+    // as soon as the mesh entities exist lets the main-pass `StandardMaterial`
+    // pipeline start compiling during the long async texture load. A late material
+    // swap (after texture load) would reset the pipeline and capture a blank color
+    // frame before it recompiled — the root cause of the 0.18 blank renders.
+    if !state.scene_loaded || state.capture_ready {
         return;
     }
 
@@ -1747,10 +1936,20 @@ fn apply_materials(
         state.materials_applied_frame = state.frame_count;
     }
 
-    // Two frames after material application is enough for the render graph
-    // to pick up the new material on native GPU. The previous 60-frame gate
-    // was a legacy llvmpipe software-rendering cushion.
-    if state.frame_count >= state.materials_applied_frame + 2 {
+    // Record the frame the texture finished loading (once).
+    if state.texture_loaded && state.texture_ready_frame == 0 {
+        state.texture_ready_frame = state.frame_count;
+    }
+
+    // Capture once the texture pixels are loaded (+ a small margin for GPU image
+    // preparation) AND the main-pass pipeline has had time to compile since the
+    // material was applied. Because the material is applied early, the pipeline is
+    // almost always ready well before the texture, so this resolves to a few frames
+    // after the texture loads — deterministic and fast (no 60/120-frame cushion).
+    let texture_ready =
+        state.texture_ready_frame != 0 && state.frame_count >= state.texture_ready_frame + 6;
+    let pipeline_ready = state.frame_count >= state.materials_applied_frame + 6;
+    if texture_ready && pipeline_ready {
         let was_ready = state.capture_ready;
         state.capture_ready = true;
         if render_trace_enabled() && !was_ready {
@@ -1783,8 +1982,9 @@ fn request_screenshot(
 
     // Spawn Screenshot entity with observer (Bevy 0.15+ API)
     println!("Requesting screenshot via Screenshot entity");
-    commands.spawn(Screenshot::primary_window()).observe(
-        move |trigger: Trigger<ScreenshotCaptured>| {
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(move |trigger: On<ScreenshotCaptured>| {
             // ScreenshotCaptured derefs to Image
             let image: &Image = trigger.event();
 
@@ -1792,15 +1992,16 @@ fn request_screenshot(
             let width = image.texture_descriptor.size.width;
             let height = image.texture_descriptor.size.height;
 
-            // Get raw image data - Bevy 0.15 Image.data is Vec<u8>
-            let rgba_data = image.data.clone();
+            // Bevy 0.18: Image.data is now Option<Vec<u8>>; skip if absent.
+            let Some(rgba_data) = image.data.clone() else {
+                return;
+            };
 
             // Store in shared buffer
             if let Ok(mut guard) = image_buffer.lock() {
                 *guard = Some((rgba_data, width, height));
             }
-        },
-    );
+        });
 
     state.screenshot_requested = true;
     println!("Screenshot requested");
@@ -1971,11 +2172,11 @@ fn setup_headless_scene(
     let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            target: RenderTarget::Image(render_target_handle.clone()),
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
+        // In Bevy 0.18 the render target is a separate `RenderTarget` component,
+        // and `RenderTarget::Image` wraps an `ImageRenderTarget` (via `From<Handle<Image>>`).
+        RenderTarget::Image(render_target_handle.clone().into()),
         Projection::Perspective(PerspectiveProjection {
             fov,
             near: request.config.near_plane,
@@ -1995,11 +2196,12 @@ fn setup_headless_scene(
         },
     ));
 
-    // Ambient light
+    // Ambient light (global resource in Bevy 0.18).
     let lighting = &request.config.lighting;
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: lighting.ambient_brightness,
+        ..default()
     });
 
     // Key light
@@ -2137,50 +2339,83 @@ fn check_headless_capture_ready(
     }
 
     state.frame_count += 1;
+    state.capture_retries += 1;
+    // Bounded fallback so a genuinely-uniform scene (or persistent invalid
+    // readback) still terminates instead of hanging to the watchdog.
+    // Generous bound: slow paths (e.g. RenderSession's retained-render-world
+    // settle after a scene swap) can take ~150 frames to produce a stable frame,
+    // so force-accepting at 150 would grab a partial frame and break parity. Only
+    // force as a true last resort to avoid hanging the watchdog.
+    let force_accept = state.capture_retries > 150;
 
-    // Check if RGBA data is ready
-    let rgba_ready = if let Ok(guard) = shared_rgba.0.lock() {
-        if let Some((rgba_data, width, height)) = guard.as_ref() {
-            if state.rgba_data.is_none() {
-                state.rgba_data = Some(rgba_data.clone());
-                state.image_width = *width;
-                state.image_height = *height;
-                // Disable further captures
-                for mut copier in query.iter_mut() {
-                    copier.enabled = false;
+    // RGBA: accept the first non-blank frame. Uniform clear-color frames are
+    // pre-geometry reads from the nondeterministic one-shot capture — reject and
+    // retry. The copier stays enabled until BOTH RGBA and depth are valid so a
+    // late/odd depth frame can still be captured.
+    if state.rgba_data.is_none() {
+        let captured_rgba = shared_rgba.0.lock().ok().and_then(|g| g.clone());
+        if let Some((rgba_data, width, height)) = captured_rgba {
+            let non_blank = rgba_data
+                .chunks_exact(4)
+                .any(|px| px[0..3] != rgba_data[0..3]);
+            // Stable == identical to the previous readback (render has settled).
+            let stable = state.prev_rgba.as_deref() == Some(rgba_data.as_slice());
+            if (non_blank && stable) || force_accept {
+                state.image_width = width;
+                state.image_height = height;
+                state.rgba_data = Some(rgba_data);
+                state.prev_rgba = None;
+            } else {
+                // Not settled yet: remember this frame and re-read fresh next one.
+                state.prev_rgba = Some(rgba_data);
+                if let Ok(mut g) = shared_rgba.0.lock() {
+                    *g = None;
                 }
             }
-            true
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
 
-    // Check if depth data is ready
-    let depth_ready = if let Ok(guard) = shared_depth.0.lock() {
-        if let Some((depth_data, _width, _height)) = guard.as_ref() {
-            if state.depth_data.is_none() {
-                state.depth_data = Some(depth_data.clone());
+    // Depth: accept the first readback that contains real foreground (the depth
+    // readback can also miss the geometry, leaving an all-far-plane buffer).
+    if state.depth_data.is_none() {
+        let captured_depth = shared_depth.0.lock().ok().and_then(|g| g.clone());
+        if let Some((depth_data, _w, _h)) = captured_depth {
+            let far = request.config.far_plane as f64;
+            // Require a real object-surface depth, not just any non-far value:
+            // near-plane garbage (~0.01) would otherwise be accepted but is not a
+            // valid surface, and downstream depth-validity checks require > 0.1m.
+            let has_foreground = depth_data.iter().any(|&d| d > 0.1 && d < far * 0.999);
+            // Settled == identical to the previous depth readback.
+            let stable = state.prev_depth.as_deref() == Some(depth_data.as_slice());
+            if has_foreground && stable {
+                state.depth_data = Some(depth_data);
+                state.prev_depth = None;
+            } else {
+                state.prev_depth = Some(depth_data);
+                if let Ok(mut g) = shared_depth.0.lock() {
+                    *g = None; // discard; retry next frame
+                }
             }
-            true
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
 
-    // Fallback to placeholder depth after 10 extra frames if depth readback fails
-    if rgba_ready && !depth_ready && state.frame_count > 70 {
+    // Last-resort fallback so we never hang the watchdog: once RGBA is in hand
+    // and we've retried a lot, fill a uniform camera-distance depth placeholder.
+    if state.rgba_data.is_some() && state.depth_data.is_none() && force_accept {
         let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
         state.depth_data = Some(vec![camera_dist; pixel_count]);
     }
 
-    if state.rgba_data.is_some() && state.depth_data.is_some() {
+    let rgba_ready = state.rgba_data.is_some();
+    let depth_ready = state.depth_data.is_some();
+
+    // Both valid → capture complete; stop the copier.
+    if rgba_ready && depth_ready {
         state.captured = true;
+        for mut copier in query.iter_mut() {
+            copier.enabled = false;
+        }
     }
 
     if let Some(t0) = t0 {
@@ -2200,7 +2435,7 @@ fn extract_and_exit_headless(
     mut state: ResMut<RenderState>,
     request: Res<RenderRequest>,
     shared_output: Res<SharedOutput>,
-    mut app_exit: EventWriter<bevy::app::AppExit>,
+    mut app_exit: MessageWriter<bevy::app::AppExit>,
     batch: Option<Res<HeadlessBatchSequence>>,
 ) {
     if batch.is_some() {
@@ -2241,7 +2476,7 @@ fn extract_and_exit_headless(
         }
 
         // Send AppExit event (headless apps use this instead of closing windows)
-        app_exit.send(bevy::app::AppExit::Success);
+        app_exit.write(bevy::app::AppExit::Success);
         state.exit_requested = true;
     }
 }
@@ -2350,6 +2585,12 @@ fn extract_and_continue_headless_batch(
         state.depth_data = None;
         state.image_width = 0;
         state.image_height = 0;
+        // Reset the per-capture settle/retry tracking too, otherwise it
+        // accumulates across viewpoints and force-accepts an unsettled frame for
+        // later viewpoints (breaking parity).
+        state.capture_retries = 0;
+        state.prev_rgba = None;
+        state.prev_depth = None;
 
         if let Some(t0) = t0 {
             eprintln!(
@@ -2418,11 +2659,9 @@ fn setup_session_persistent_scene(
     let fov = config.0.fov_radians();
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            hdr: true,
-            target: RenderTarget::Image(render_target_handle.clone()),
-            ..default()
-        },
+        Camera::default(),
+        Hdr,
+        RenderTarget::Image(render_target_handle.clone().into()),
         Projection::Perspective(PerspectiveProjection {
             fov,
             near: config.0.near_plane,
@@ -2442,9 +2681,10 @@ fn setup_session_persistent_scene(
     ));
 
     let lighting = &config.0.lighting;
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: lighting.ambient_brightness,
+        ..default()
     });
 
     if lighting.key_light_intensity > 0.0 {
@@ -2526,6 +2766,13 @@ impl RenderSession {
         let mut app = App::new();
         app.add_plugins(
             DefaultPlugins
+                .set(bevy::asset::AssetPlugin {
+                    // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                    // default (UnapprovedPathMode::Forbid → load() silently returns a
+                    // default handle). YCB meshes load from absolute paths, so allow them.
+                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -2536,6 +2783,17 @@ impl RenderSession {
                 .disable::<TerminalCtrlCHandlerPlugin>(),
         )
         .add_plugins(ObjPlugin)
+        // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+        // Scene spawning panics unless those component types are registered. The
+        // minimal headless plugin set doesn't register them, so do it explicitly.
+        .register_type::<Mesh3d>()
+        .register_type::<MeshMaterial3d<StandardMaterial>>()
+        .register_type::<bevy::prelude::Transform>()
+        .register_type::<bevy::prelude::GlobalTransform>()
+        .register_type::<bevy::transform::components::TransformTreeChanged>()
+        .register_type::<bevy::prelude::Visibility>()
+        .register_type::<bevy::prelude::InheritedVisibility>()
+        .register_type::<bevy::prelude::ViewVisibility>()
         .add_plugins(ImageCopyPlugin {
             shared_rgba: shared_rgba.clone(),
         })
@@ -2665,7 +2923,7 @@ impl RenderSession {
                 .iter(world)
                 .collect();
             for entity in stale {
-                world.entity_mut(entity).despawn_recursive();
+                world.entity_mut(entity).despawn();
             }
 
             // Clear shared RGBA/depth buffers so a stale payload can't leak
@@ -2684,8 +2942,8 @@ impl RenderSession {
             // Update RenderRequest so the existing capture systems see the new
             // object paths, rotation, and camera transform (seeded from first vp).
             let new_request = RenderRequest {
-                mesh_path: mesh_path.display().to_string(),
-                texture_path: texture_path.display().to_string(),
+                mesh_path: fs_path_to_asset_string(&mesh_path),
+                texture_path: fs_path_to_asset_string(&texture_path),
                 camera_transform: viewpoints[0],
                 object_rotation: first.object_rotation.clone(),
                 config: self.render_config.clone(),
@@ -2695,9 +2953,10 @@ impl RenderSession {
             // Kick off asset loads and install the handles under the names the
             // existing `check_assets_loaded` system expects.
             let asset_server = world.resource::<AssetServer>().clone();
-            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
+            let scene_handle: Handle<Scene> =
+                asset_server.load(fs_path_to_asset_string(&mesh_path));
             let texture_handle: Handle<Image> =
-                asset_server.load(texture_path.display().to_string());
+                asset_server.load(fs_path_to_asset_string(&texture_path));
             world.insert_resource(LoadedScene(scene_handle.clone()));
             world.insert_resource(LoadedTexture(texture_handle));
 
@@ -2723,11 +2982,15 @@ impl RenderSession {
                 }
             }
 
-            // Install the viewpoint sequence for this render() call.
+            // Install the viewpoint sequence for this render() call. The robust
+            // settled-frame capture (reject blank/partial readbacks, retry until
+            // two consecutive readbacks match) absorbs the despawn/respawn
+            // render-world settle, so a separate discarded warmup pass is not
+            // needed and the per-object cost stays low.
             world.insert_resource(HeadlessBatchSequence::new(viewpoints.clone()));
         }
 
-        // --- drive the capture loop ---
+        // --- drive the real capture loop ---
         let timeout = std::time::Duration::from_secs(RENDER_TIMEOUT_SECS);
         let start = std::time::Instant::now();
         loop {
@@ -2832,13 +3095,13 @@ impl PersistentRenderer {
         let mesh_path = object_dir.join(GOOGLE_16K_MESH_RELATIVE);
         let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
         if !mesh_path.exists() {
-            return Err(crate::RenderError::MeshNotFound(
-                mesh_path.display().to_string(),
-            ));
+            return Err(crate::RenderError::MeshNotFound(fs_path_to_asset_string(
+                &mesh_path,
+            )));
         }
         if !texture_path.exists() {
             return Err(crate::RenderError::TextureNotFound(
-                texture_path.display().to_string(),
+                fs_path_to_asset_string(&texture_path),
             ));
         }
 
@@ -2848,6 +3111,13 @@ impl PersistentRenderer {
         let mut app = App::new();
         app.add_plugins(
             DefaultPlugins
+                .set(bevy::asset::AssetPlugin {
+                    // Bevy 0.17+ forbids loading from absolute / `..` asset paths by
+                    // default (UnapprovedPathMode::Forbid → load() silently returns a
+                    // default handle). YCB meshes load from absolute paths, so allow them.
+                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -2858,6 +3128,17 @@ impl PersistentRenderer {
                 .disable::<TerminalCtrlCHandlerPlugin>(),
         )
         .add_plugins(ObjPlugin)
+        // bevy_obj's Scene contains Mesh3d + MeshMaterial3d entities; reflection-based
+        // Scene spawning panics unless those component types are registered. The
+        // minimal headless plugin set doesn't register them, so do it explicitly.
+        .register_type::<Mesh3d>()
+        .register_type::<MeshMaterial3d<StandardMaterial>>()
+        .register_type::<bevy::prelude::Transform>()
+        .register_type::<bevy::prelude::GlobalTransform>()
+        .register_type::<bevy::transform::components::TransformTreeChanged>()
+        .register_type::<bevy::prelude::Visibility>()
+        .register_type::<bevy::prelude::InheritedVisibility>()
+        .register_type::<bevy::prelude::ViewVisibility>()
         .add_plugins(ImageCopyPlugin {
             shared_rgba: shared_rgba.clone(),
         })
@@ -2896,8 +3177,8 @@ impl PersistentRenderer {
         // — its purpose is to pay PSO compilation and material application
         // upfront so the first user-facing render() is fast.
         let initial_request = RenderRequest {
-            mesh_path: mesh_path.display().to_string(),
-            texture_path: texture_path.display().to_string(),
+            mesh_path: fs_path_to_asset_string(&mesh_path),
+            texture_path: fs_path_to_asset_string(&texture_path),
             camera_transform: Transform::default(),
             object_rotation: ObjectRotation::identity(),
             config: render_config.clone(),
@@ -2906,9 +3187,10 @@ impl PersistentRenderer {
         {
             let world = app.world_mut();
             let asset_server = world.resource::<AssetServer>().clone();
-            let scene_handle: Handle<Scene> = asset_server.load(mesh_path.display().to_string());
+            let scene_handle: Handle<Scene> =
+                asset_server.load(fs_path_to_asset_string(&mesh_path));
             let texture_handle: Handle<Image> =
-                asset_server.load(texture_path.display().to_string());
+                asset_server.load(fs_path_to_asset_string(&texture_path));
             world.insert_resource(LoadedScene(scene_handle.clone()));
             world.insert_resource(LoadedTexture(texture_handle));
             world.insert_resource(initial_request);
@@ -3100,17 +3382,19 @@ pub fn render_to_files(
     let texture_path = object_dir.join(GOOGLE_16K_TEXTURE_RELATIVE);
 
     if !mesh_path.exists() {
-        return Err(RenderError::MeshNotFound(mesh_path.display().to_string()));
+        return Err(RenderError::MeshNotFound(fs_path_to_asset_string(
+            &mesh_path,
+        )));
     }
     if !texture_path.exists() {
-        return Err(RenderError::TextureNotFound(
-            texture_path.display().to_string(),
-        ));
+        return Err(RenderError::TextureNotFound(fs_path_to_asset_string(
+            &texture_path,
+        )));
     }
 
     let request = RenderRequest {
-        mesh_path: mesh_path.display().to_string(),
-        texture_path: texture_path.display().to_string(),
+        mesh_path: fs_path_to_asset_string(&mesh_path),
+        texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
         config: config.clone(),

@@ -26,6 +26,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Tolerance (in meters) for cross-path depth-parity comparisons.
+///
+/// The GPU depth attachment is f32 (~1e-7 relative resolution). Two independent
+/// render apps rendering the same object are deterministic *within* a path but can
+/// differ by one f32 ULP at a pixel across app instances — that difference rounds
+/// away in the u8 RGBA (which IS byte-identical across paths) but is visible in the
+/// f32 depth. Measured worst case on RTX 4090 / native Windows is 2.98e-8 m
+/// (= 1 f32 ULP at ~0.5 m). A `1e-9` threshold is below f32 resolution and cannot
+/// hold for f32 GPU depth across app instances; `1e-5` keeps the gate tight enough
+/// to catch any real render divergence (which is meter-scale) while tolerating
+/// f32 ULP noise. See issue #86.
+const DEPTH_PARITY_EPS_METERS: f64 = 1e-5;
+
 /// Save render output to test_fixtures/test_renders for inspection
 fn save_render_output(output: &RenderOutput, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let render_dir = PathBuf::from("test_fixtures/test_renders");
@@ -225,7 +238,7 @@ fn test_batch_render_matches_sequential_episode_outputs() {
             .map(|(lhs, rhs)| (lhs - rhs).abs())
             .fold(0.0_f64, f64::max);
         assert!(
-            max_depth_delta <= 1e-9,
+            max_depth_delta <= DEPTH_PARITY_EPS_METERS,
             "Depth mismatch at viewpoint {idx}: max delta {max_depth_delta}"
         );
     }
@@ -397,7 +410,7 @@ fn test_session_vs_fresh_n_batch_smoke() {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f64, f64::max);
         assert!(
-            max_depth_delta <= 1e-9,
+            max_depth_delta <= DEPTH_PARITY_EPS_METERS,
             "Depth mismatch at viewpoint {idx}: max delta {max_depth_delta}"
         );
     }
@@ -549,7 +562,7 @@ fn test_render_session_matches_sequential_across_objects() {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
             assert!(
-                max_depth_delta <= 1e-9,
+                max_depth_delta <= DEPTH_PARITY_EPS_METERS,
                 "Depth mismatch for object {object_id} viewpoint {vp_idx}: \
                  max delta {max_depth_delta}"
             );
@@ -876,8 +889,8 @@ fn test_persistent_renderer_matches_render_to_buffer() {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f64, f64::max);
         assert!(
-            max_delta <= 1e-9,
-            "step {idx}: depth max delta {max_delta} exceeds 1e-9"
+            max_delta <= DEPTH_PARITY_EPS_METERS,
+            "step {idx}: depth max delta {max_delta} exceeds f32 depth-parity tolerance"
         );
         println!("  ✓ step {idx} pixel-exact");
     }
