@@ -45,7 +45,8 @@
 //! ```
 
 use crate::{
-    CameraIntrinsics, ObjectRotation, RenderConfig, RenderHealth, RenderOutput, TargetingPolicy,
+    semantic_3d_from_depth, CameraIntrinsics, ObjectRotation, RenderConfig, RenderHealth,
+    RenderOutput, TargetingPolicy,
 };
 use bevy::prelude::{Transform, Vec3};
 use std::collections::VecDeque;
@@ -121,6 +122,8 @@ pub struct BatchRenderOutput {
     pub height: u32,
     /// Camera intrinsics used
     pub intrinsics: CameraIntrinsics,
+    /// Camera transform used for world-space depth unprojection.
+    pub camera_transform: Transform,
     /// Point the camera was intended to target for this render.
     pub target_point: Vec3,
     /// Policy used to derive `target_point`.
@@ -170,9 +173,39 @@ impl BatchRenderOutput {
         image
     }
 
+    /// Build TBP-style `semantic_3d` rows using this request's far plane.
+    ///
+    /// The returned vector is row-major with one `[x, y, z, semantic_id]` row
+    /// per pixel. Foreground pixels are unprojected into world space and use
+    /// `object_semantic_id`; background/far pixels are `[0, 0, 0, 0]`.
+    pub fn semantic_3d(&self, object_semantic_id: u32) -> Vec<[f64; 4]> {
+        self.semantic_3d_with_far_plane(
+            object_semantic_id,
+            self.request.render_config.far_plane as f64,
+        )
+    }
+
+    /// Build TBP-style `semantic_3d` rows using a caller-provided far plane.
+    pub fn semantic_3d_with_far_plane(
+        &self,
+        object_semantic_id: u32,
+        far_plane: f64,
+    ) -> Vec<[f64; 4]> {
+        semantic_3d_from_depth(
+            &self.depth,
+            self.width,
+            self.height,
+            &self.intrinsics,
+            self.camera_transform,
+            object_semantic_id,
+            far_plane,
+        )
+    }
+
     /// Convert from RenderOutput, carrying request-level target metadata.
     pub fn from_render_output(request: BatchRenderRequest, output: RenderOutput) -> Self {
         let health = output.health_with_far_plane(request.render_config.far_plane as f64);
+        let camera_transform = output.camera_transform;
         let target_point = request.target_point;
         let targeting_policy = request.targeting_policy.clone();
         Self {
@@ -182,6 +215,7 @@ impl BatchRenderOutput {
             width: output.width,
             height: output.height,
             intrinsics: output.intrinsics,
+            camera_transform,
             target_point,
             targeting_policy,
             health,
@@ -408,6 +442,7 @@ mod tests {
             width: 2,
             height: 2,
             intrinsics: RenderConfig::tbp_default().intrinsics(),
+            camera_transform: Transform::default(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
             health: RenderHealth {
@@ -434,9 +469,10 @@ mod tests {
     #[test]
     fn test_batch_render_output_carries_request_target_metadata() {
         let target_point = Vec3::new(0.25, -0.125, 0.5);
+        let camera_transform = Transform::from_xyz(0.0, 0.0, 2.0).looking_at(Vec3::ZERO, Vec3::Y);
         let request = BatchRenderRequest {
             object_dir: "/tmp/test".into(),
-            viewpoint: Transform::default(),
+            viewpoint: camera_transform,
             object_rotation: ObjectRotation::identity(),
             render_config: RenderConfig::tbp_default(),
             target_point,
@@ -448,7 +484,7 @@ mod tests {
             width: 1,
             height: 1,
             intrinsics: RenderConfig::tbp_default().intrinsics(),
-            camera_transform: Transform::default(),
+            camera_transform,
             object_rotation: ObjectRotation::identity(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -458,10 +494,48 @@ mod tests {
 
         assert_eq!(batch_output.target_point, target_point);
         assert_eq!(batch_output.targeting_policy, TargetingPolicy::MeshCenter);
+        assert_eq!(batch_output.camera_transform, camera_transform);
         assert_eq!(batch_output.request.target_point, target_point);
         assert_eq!(
             batch_output.request.targeting_policy,
             TargetingPolicy::MeshCenter
         );
+    }
+
+    #[test]
+    fn test_batch_render_output_semantic_3d_uses_camera_transform() {
+        let camera_transform = Transform::from_xyz(0.0, 0.0, 2.0).looking_at(Vec3::ZERO, Vec3::Y);
+        let request = BatchRenderRequest {
+            object_dir: "/tmp/test".into(),
+            viewpoint: camera_transform,
+            object_rotation: ObjectRotation::identity(),
+            render_config: RenderConfig::tbp_default(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
+        };
+        let output = RenderOutput {
+            rgba: vec![0u8; 4],
+            depth: vec![1.5],
+            width: 1,
+            height: 1,
+            intrinsics: CameraIntrinsics {
+                focal_length: [100.0, 100.0],
+                principal_point: [0.0, 0.0],
+                image_size: [1, 1],
+            },
+            camera_transform,
+            object_rotation: ObjectRotation::identity(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
+        };
+
+        let batch_output = BatchRenderOutput::from_render_output(request, output);
+        let rows = batch_output.semantic_3d(7);
+
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0][0]).abs() < 1e-6);
+        assert!((rows[0][1]).abs() < 1e-6);
+        assert!((rows[0][2] - 0.5).abs() < 1e-6);
+        assert_eq!(rows[0][3], 7.0);
     }
 }
