@@ -3296,6 +3296,9 @@ impl PersistentRenderer {
                 state.image_width = 0;
                 state.image_height = 0;
                 state.capture_ready = true;
+                state.capture_retries = 0;
+                state.prev_rgba = None;
+                state.prev_depth = None;
             }
 
             // Clear shared GPU readback buffers so a stale payload from the
