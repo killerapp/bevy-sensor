@@ -884,6 +884,65 @@ pub struct RenderOutput {
     pub targeting_policy: TargetingPolicy,
 }
 
+pub(crate) fn semantic_3d_from_depth(
+    depth: &[f64],
+    width: u32,
+    height: u32,
+    intrinsics: &CameraIntrinsics,
+    camera_transform: Transform,
+    object_semantic_id: u32,
+    far_plane: f64,
+) -> Vec<[f64; 4]> {
+    let total_pixels = (width as usize).saturating_mul(height as usize);
+    let mut rows = Vec::with_capacity(total_pixels);
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let Some(&pixel_depth) = depth.get(idx) else {
+                rows.push([0.0, 0.0, 0.0, 0.0]);
+                continue;
+            };
+            let Some(world) = pixel_surface_point_world_from_parts(
+                pixel_depth,
+                [x, y],
+                intrinsics,
+                camera_transform,
+                far_plane,
+            ) else {
+                rows.push([0.0, 0.0, 0.0, 0.0]);
+                continue;
+            };
+            rows.push([world[0], world[1], world[2], object_semantic_id as f64]);
+        }
+    }
+    rows
+}
+
+fn pixel_surface_point_world_from_parts(
+    depth: f64,
+    pixel: [u32; 2],
+    intrinsics: &CameraIntrinsics,
+    camera_transform: Transform,
+    far_plane: f64,
+) -> Option<[f64; 3]> {
+    if !RenderOutput::is_foreground_depth(depth, far_plane) {
+        return None;
+    }
+
+    let fx = intrinsics.focal_length[0];
+    let fy = intrinsics.focal_length[1];
+    if !fx.is_finite() || !fy.is_finite() || fx.abs() <= f64::EPSILON || fy.abs() <= f64::EPSILON {
+        return None;
+    }
+
+    let [x, y] = pixel;
+    let camera_x = (x as f64 - intrinsics.principal_point[0]) / fx * depth;
+    let camera_y = -((y as f64 - intrinsics.principal_point[1]) / fy * depth);
+    let point = Vec3::new(camera_x as f32, camera_y as f32, -depth as f32);
+    let world = camera_transform.translation + camera_transform.rotation * point;
+    Some([world.x as f64, world.y as f64, world.z as f64])
+}
+
 impl RenderOutput {
     /// Default far plane used by TBP render helpers.
     pub const TBP_FAR_PLANE_METERS: f64 = 10.0;
@@ -1089,23 +1148,39 @@ impl RenderOutput {
     ) -> Option<[f64; 3]> {
         let [x, y] = pixel;
         let depth = self.get_depth(x, y)?;
-        if !Self::is_foreground_depth(depth, far_plane) {
-            return None;
-        }
+        pixel_surface_point_world_from_parts(
+            depth,
+            pixel,
+            &self.intrinsics,
+            self.camera_transform,
+            far_plane,
+        )
+    }
 
-        let fx = self.intrinsics.focal_length[0];
-        let fy = self.intrinsics.focal_length[1];
-        if !fx.is_finite()
-            || !fy.is_finite()
-            || fx.abs() <= f64::EPSILON
-            || fy.abs() <= f64::EPSILON
-        {
-            return None;
-        }
+    /// Build TBP-style `semantic_3d` rows using the TBP default far plane.
+    ///
+    /// The returned vector is row-major with one `[x, y, z, semantic_id]` row
+    /// per pixel. Foreground pixels are unprojected into world space and use
+    /// `object_semantic_id`; background/far pixels are `[0, 0, 0, 0]`.
+    pub fn semantic_3d(&self, object_semantic_id: u32) -> Vec<[f64; 4]> {
+        self.semantic_3d_with_far_plane(object_semantic_id, Self::TBP_FAR_PLANE_METERS)
+    }
 
-        let camera_x = (x as f64 - self.intrinsics.principal_point[0]) / fx * depth;
-        let camera_y = -((y as f64 - self.intrinsics.principal_point[1]) / fy * depth);
-        Some(self.camera_to_world_point([camera_x, camera_y, -depth]))
+    /// Build TBP-style `semantic_3d` rows using a caller-provided far plane.
+    pub fn semantic_3d_with_far_plane(
+        &self,
+        object_semantic_id: u32,
+        far_plane: f64,
+    ) -> Vec<[f64; 4]> {
+        semantic_3d_from_depth(
+            &self.depth,
+            self.width,
+            self.height,
+            &self.intrinsics,
+            self.camera_transform,
+            object_semantic_id,
+            far_plane,
+        )
     }
 
     /// Convert to neocortx-compatible image format: Vec<Vec<[u8; 3]>>
@@ -2373,6 +2448,65 @@ mod tests {
         assert_eq!(depth_image.len(), 2);
         assert_eq!(depth_image[0], vec![1.0, 2.0]);
         assert_eq!(depth_image[1], vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_render_output_semantic_3d_marks_foreground_and_background() {
+        let output = render_output_for_depth(
+            2,
+            2,
+            vec![0.25, 10.0, 0.5, f64::INFINITY],
+            CameraIntrinsics {
+                focal_length: [1.0, 1.0],
+                principal_point: [0.0, 0.0],
+                image_size: [2, 2],
+            },
+            Transform::IDENTITY,
+        );
+
+        let semantic = output.semantic_3d(42);
+
+        assert_eq!(semantic.len(), 4);
+        assert_eq!(semantic[0][3], 42.0);
+        assert_eq!(semantic[1], [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(semantic[2][3], 42.0);
+        assert_eq!(semantic[3], [0.0, 0.0, 0.0, 0.0]);
+        assert_point_close(
+            [semantic[0][0], semantic[0][1], semantic[0][2]],
+            [0.0, 0.0, -0.25],
+        );
+        assert_point_close(
+            [semantic[2][0], semantic[2][1], semantic[2][2]],
+            [0.0, -0.5, -0.5],
+        );
+    }
+
+    #[test]
+    fn test_render_output_semantic_3d_matches_pixel_surface_points() {
+        let output = render_output_for_depth(
+            3,
+            3,
+            vec![10.0, 10.0, 2.0, 10.0, 0.25, 10.0, 10.0, 10.0, 10.0],
+            CameraIntrinsics {
+                focal_length: [1.0, 1.0],
+                principal_point: [1.0, 1.0],
+                image_size: [3, 3],
+            },
+            Transform::IDENTITY,
+        );
+
+        let semantic = output.semantic_3d(3);
+        let top_right = output
+            .pixel_surface_point_world([2, 0])
+            .expect("foreground point");
+        let center = output
+            .pixel_surface_point_world([1, 1])
+            .expect("foreground point");
+
+        assert_point_close([semantic[2][0], semantic[2][1], semantic[2][2]], top_right);
+        assert_eq!(semantic[2][3], 3.0);
+        assert_point_close([semantic[4][0], semantic[4][1], semantic[4][2]], center);
+        assert_eq!(semantic[4][3], 3.0);
     }
 
     #[test]
