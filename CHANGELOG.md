@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/killerapp/bevy-sensor/compare/v0.6.0...v0.7.0) - 2026-06-16
+
+### Added
+
+- expose semantic 3d render rows ([#99](https://github.com/killerapp/bevy-sensor/pull/99))
+
 ## [0.6.0](https://github.com/killerapp/bevy-sensor/compare/v0.5.6...v0.6.0) - 2026-06-09
 
 ### Added
