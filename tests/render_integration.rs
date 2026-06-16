@@ -39,6 +39,13 @@ use std::time::Instant;
 /// f32 ULP noise. See issue #86.
 const DEPTH_PARITY_EPS_METERS: f64 = 1e-5;
 
+fn ycb_object_dir(object_id: &str) -> PathBuf {
+    std::env::var_os("BEVY_SENSOR_YCB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/ycb"))
+        .join(object_id)
+}
+
 /// Save render output to test_fixtures/test_renders for inspection
 fn save_render_output(output: &RenderOutput, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let render_dir = PathBuf::from("test_fixtures/test_renders");
@@ -835,7 +842,7 @@ fn test_cache_with_multiple_viewpoints() {
 fn test_persistent_renderer_matches_render_to_buffer() {
     println!("\n=== PersistentRenderer vs render_to_buffer pixel-exact gate ===");
 
-    let object_dir = PathBuf::from("/tmp/ycb/003_cracker_box");
+    let object_dir = ycb_object_dir("003_cracker_box");
     if !object_dir.exists() {
         println!("⚠ Skipping - YCB models not found at {:?}", object_dir);
         return;
