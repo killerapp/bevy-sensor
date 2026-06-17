@@ -64,6 +64,25 @@ Any object with the standard YCB/ycbust layout can be rendered the same way:
     just render-tbp-benchmark
     ```
 
+    The core test/CI `just` recipes (`just test`, `just full-test`, `just ci`)
+    are intended to run from PowerShell, Git Bash, WSL, or a Unix shell. They
+    default `WGPU_BACKEND` to `vulkan` through Just's exported environment
+    support, so PowerShell users do not need POSIX inline environment syntax.
+    Override the backend when needed:
+    ```powershell
+    just --set WGPU_BACKEND webgpu test-render-integration
+    ```
+
+    If Cargo warns that incremental-cache hard links failed on an offloaded,
+    network, or synced target directory, keep the build target on a local NTFS
+    path for validation runs:
+    ```powershell
+    $env:CARGO_TARGET_DIR = "C:\cargo-target\bevy-sensor"
+    cargo test
+    ```
+    The warning is a local filesystem fallback; tests can still pass, but builds
+    may be slower and noisier.
+
 ## Usage
 
 ### CLI (Batch Rendering)
