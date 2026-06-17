@@ -2087,11 +2087,20 @@ fn check_screenshot_ready(
         false
     };
 
-    // If depth readback failed or is taking too long, fall back to placeholder
-    // (This allows graceful degradation on systems where depth readback fails)
+    // If depth readback failed or is taking too long, fall back to placeholder.
+    // As in check_headless_capture_ready, this uniform plane is a DEGRADED render
+    // (flat depth, no real geometry) that must be loud — it silently masked the
+    // #92 depth regression. (This fn is currently dead code; kept loud in case it
+    // is ever revived.)
     if rgba_ready && !depth_ready && state.frame_count > 60 {
         let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
+        eprintln!(
+            "[bevy-sensor][WARN] depth readback produced no valid frame; falling back to a \
+             UNIFORM {:.4} m camera-distance plane (degraded render, no real 3D geometry). \
+             Indicates a depth-readback regression.",
+            camera_dist
+        );
         state.depth_data = Some(vec![camera_dist; pixel_count]);
     }
 
@@ -2430,9 +2439,24 @@ fn check_headless_capture_ready(
 
     // Last-resort fallback so we never hang the watchdog: once RGBA is in hand
     // and we've retried a lot, fill a uniform camera-distance depth placeholder.
+    //
+    // This is NOT a valid render — it is a flat depth plane that extracts
+    // features and passes buffer-equality parity tests yet unprojects every
+    // pixel onto one sheet, silently cratering downstream spatial matching
+    // (this exact fallback masked the Bevy 0.18 depth regression in #92). It
+    // must therefore be LOUD: a future depth-readback regression has to surface
+    // in logs/CI instead of looking like a successful render. `tests/
+    // spatial_parity.rs` is the geometric guard for the same failure.
     if state.rgba_data.is_some() && state.depth_data.is_none() && force_accept {
         let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
+        eprintln!(
+            "[bevy-sensor][WARN] depth readback produced no valid frame after {} retries; \
+             falling back to a UNIFORM {:.4} m camera-distance plane. This is a degraded \
+             render (flat depth -> no real 3D geometry) and indicates a depth-readback \
+             regression. See render.rs DepthReadbackNode and tests/spatial_parity.rs.",
+            state.capture_retries, camera_dist
+        );
         state.depth_data = Some(vec![camera_dist; pixel_count]);
     }
 
