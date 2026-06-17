@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/killerapp/bevy-sensor/compare/v0.7.1...v0.7.2) - 2026-06-17
+
+### Fixed
+
+- *(render)* honor configured near plane
+
+### Other
+
+- document Windows validation setup
+- Merge pull request #96 from killerapp/fix/depth-fallback-loud
+
 ## [0.7.1](https://github.com/killerapp/bevy-sensor/compare/v0.7.0...v0.7.1) - 2026-06-16
 
 ### Fixed
