@@ -62,6 +62,9 @@ mod render;
 // Batch rendering API for efficient multi-viewpoint rendering
 pub mod batch;
 
+// Benchmark helpers for renderer throughput artifacts
+pub mod benchmark;
+
 // WebGPU and cross-platform backend support
 pub mod backend;
 

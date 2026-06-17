@@ -115,6 +115,39 @@ manifest/index JSON. Live `RenderOutput` and `BatchRenderOutput` values also car
 `target_point` and `targeting_policy`, so consumers do not need to recompute the
 rotated mesh-center pivot from manifest metadata.
 
+### Renderer Throughput Benchmarks
+
+Use `render_benchmark` when changing hot render paths. It mirrors the two
+NeoCortx shapes that matter most:
+
+```bash
+just bench-render-smoke
+just bench-render-neocortx-3
+just bench-render-persistent-smoke
+```
+
+Larger local gates are available when the GPU/YCB cache is ready:
+
+```bash
+just bench-render-neocortx-10
+just bench-render-persistent-surface
+```
+
+Each run writes a self-contained artifact directory under
+`output/benchmarks/<run>/` with:
+
+- `metrics.json`: machine-readable throughput, health, environment, and git metadata.
+- `report.md`: human-readable summary with group-level frames/sec and ms/frame.
+- `visual_grid.png`: RGB/depth sample grid.
+- `visual_judge_prompt.md`: prompt for a vision-capable LLM judge.
+- `visual_samples.json`: sample ordering and render-health metadata.
+
+The fixed-orbit workloads use `RenderSession` in the same object/rotation
+groups NeoCortx uses for YCB benchmark episodes. The persistent workloads use
+`PersistentRenderer` for surface-policy-style per-step camera updates. Missing
+YCB objects are downloaded by default; pass `--no-download` to fail fast on a
+frozen benchmark machine.
+
 ### Library (Rust)
 
 Add to your `Cargo.toml`:

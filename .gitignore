@@ -5,6 +5,7 @@
 !docs/images/*.png
 assets/
 tmp_data/
+output/benchmarks/
 
 # Pre-rendered fixtures (generate locally with: cargo run --bin prerender)
 test_fixtures/

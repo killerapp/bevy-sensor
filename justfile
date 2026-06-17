@@ -37,20 +37,16 @@ lint:
 # Run all tests
 test:
     cargo test -- --test-threads=1
-
 # Run tests with output
 test-verbose:
     cargo test -- --test-threads=1 --nocapture
-
 # Run only library tests
 test-lib:
     cargo test --lib -- --test-threads=1
-
 # Run rendering integration tests (hardware test - uses GPU)
 # Generates test renders in test_fixtures/test_renders/
 test-render-integration:
     cargo test -- --ignored --test render_integration -- --nocapture
-
 # Run integration tests with WebGPU backend explicitly
 test-render-webgpu:
     just --set WGPU_BACKEND webgpu test-render-integration
@@ -77,6 +73,26 @@ render-batch objects:
 # Batch render all TBP benchmark objects (10 objects)
 render-tbp-benchmark:
     cargo run --bin prerender -- --objects "002_master_chef_can,003_cracker_box,004_sugar_box,005_tomato_soup_can,006_mustard_bottle,007_tuna_fish_can,008_pudding_box,009_gelatin_box,010_potted_meat_can,011_banana"
+
+# Quick renderer throughput smoke with visual judge packet
+bench-render-smoke:
+    cargo run --release --bin render_benchmark -- --workload fixed-orbit-smoke
+
+# NeoCortx-shaped 3-object fixed-orbit renderer throughput benchmark
+bench-render-neocortx-3:
+    cargo run --release --bin render_benchmark -- --workload fixed-orbit-3
+
+# NeoCortx-shaped 10-object fixed-orbit renderer throughput benchmark
+bench-render-neocortx-10:
+    cargo run --release --bin render_benchmark -- --workload fixed-orbit-10
+
+# PersistentRenderer per-step throughput smoke with visual judge packet
+bench-render-persistent-smoke:
+    cargo run --release --bin render_benchmark -- --workload persistent-smoke
+
+# PersistentRenderer surface-policy style throughput benchmark
+bench-render-persistent-surface:
+    cargo run --release --bin render_benchmark -- --workload persistent-surface
 # Render to custom output directory
 # Usage: just render-to <dir> [objects]
 render-to dir objects="003_cracker_box":
@@ -190,6 +206,9 @@ help:
     @echo "  just render-single 003_cracker_box     # Single viewpoint render"
     @echo "  just render-batch \"obj1,obj2\"          # Batch render specific objects"
     @echo "  just render-tbp-benchmark              # Render all 10 TBP benchmark objects"
+    @echo "  just bench-render-smoke                # Quick throughput + visual packet"
+    @echo "  just bench-render-neocortx-3           # 3-object fixed-orbit throughput"
+    @echo "  just bench-render-persistent-smoke     # Per-step PersistentRenderer throughput"
     @echo ""
     @echo "CONFIGURATION:"
     @echo "  - Resolution: 64x64 (TBP default)"
