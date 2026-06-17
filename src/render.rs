@@ -240,9 +240,8 @@ struct DepthCaptureRequest {
 ///
 /// `m22`/`m32` are the relevant entries of the view's reverse-Z projection
 /// matrix (`clip_from_view`), captured at copy time so the CPU-side
-/// linearization matches the exact projection the GPU rendered with — including
-/// whatever near plane Bevy actually used (which is not necessarily
-/// `RenderConfig::near_plane`; Bevy 0.18 renders this camera with near = 0.1).
+/// linearization matches the exact projection the GPU rendered with. This keeps
+/// depth output robust if projection construction or backend behavior changes.
 struct PendingDepthCapture {
     buffer: Buffer,
     width: u32,
@@ -252,9 +251,51 @@ struct PendingDepthCapture {
     far: f32,
 }
 
+fn render_projection(config: &RenderConfig) -> Projection {
+    let near = config.near_plane;
+    Projection::Perspective(PerspectiveProjection {
+        fov: config.fov_radians(),
+        near,
+        far: config.far_plane,
+        near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -near),
+        ..default()
+    })
+}
+
 /// Queue for pending depth captures (written by render node, read by cleanup system)
 #[derive(Resource, Default)]
 struct PendingDepthCaptureQueue(Arc<Mutex<Vec<PendingDepthCapture>>>);
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn render_projection_uses_configured_near_plane_for_effective_clip_matrix() {
+        let mut config = RenderConfig::tbp_default();
+        config.near_plane = 0.025;
+        config.far_plane = 12.0;
+
+        let projection = render_projection(&config);
+        let Projection::Perspective(perspective) = &projection else {
+            panic!("render_projection should create a perspective projection");
+        };
+
+        assert_eq!(perspective.near, config.near_plane);
+        assert_eq!(
+            perspective.near_clip_plane,
+            Vec4::new(0.0, 0.0, -1.0, -config.near_plane)
+        );
+        assert_eq!(perspective.far, config.far_plane);
+
+        let clip_from_view = projection.get_clip_from_view();
+        assert!(
+            (clip_from_view.w_axis.z - config.near_plane).abs() < 1e-6,
+            "reverse-Z projection matrix should encode configured near plane; got {}",
+            clip_from_view.w_axis.z
+        );
+    }
+}
 
 // ============================================================================
 // Depth Buffer Helpers
@@ -349,8 +390,8 @@ mod depth_helpers {
     /// view-space distance `d = -z` gives **`d = m32 / (ndc + m22)`**. This holds
     /// for both finite and infinite reverse-Z and is correct regardless of which
     /// near plane the renderer actually used — the previous fixed-near formula
-    /// produced depths 10x too small on Bevy 0.18, which renders this camera with
-    /// near = 0.1 even though `RenderConfig::near_plane` is 0.01 (issue #86/#92).
+    /// produced depths 10x too small when the effective projection near plane
+    /// drifted from `RenderConfig::near_plane` (issue #86/#92/#95).
     ///
     /// `m22 = clip_from_view[col=2][row=2]`, `m32 = clip_from_view[col=3][row=2]`.
     /// `ndc <= 0` is the reverse-Z far plane (background) and maps to `far`.
@@ -1755,17 +1796,11 @@ fn setup_scene(
     // Camera with depth prepass (Bevy 0.15+ uses Camera3d component)
     // Disable MSAA for depth readback compatibility (can't copy from multisampled texture)
     // Apply FOV from RenderConfig so the projection matches TBP's camera intrinsics.
-    let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
         Camera::default(),
         Hdr,
-        Projection::Perspective(PerspectiveProjection {
-            fov,
-            near: request.config.near_plane,
-            far: request.config.far_plane,
-            ..default()
-        }),
+        render_projection(&request.config),
         Msaa::Off,
         request.camera_transform,
         Tonemapping::None, // Accurate colors for software rendering
@@ -2169,7 +2204,6 @@ fn setup_headless_scene(
     commands.insert_resource(RenderTargetImage(render_target_handle.clone()));
 
     // Camera rendering to the image texture (NO window!)
-    let fov = request.config.fov_radians();
     commands.spawn((
         Camera3d::default(),
         Camera::default(),
@@ -2177,12 +2211,7 @@ fn setup_headless_scene(
         // In Bevy 0.18 the render target is a separate `RenderTarget` component,
         // and `RenderTarget::Image` wraps an `ImageRenderTarget` (via `From<Handle<Image>>`).
         RenderTarget::Image(render_target_handle.clone().into()),
-        Projection::Perspective(PerspectiveProjection {
-            fov,
-            near: request.config.near_plane,
-            far: request.config.far_plane,
-            ..default()
-        }),
+        render_projection(&request.config),
         Msaa::Off,
         request.camera_transform,
         Tonemapping::None,
@@ -2656,18 +2685,12 @@ fn setup_session_persistent_scene(
     let render_target_handle = images.add(render_target_image);
     commands.insert_resource(RenderTargetImage(render_target_handle.clone()));
 
-    let fov = config.0.fov_radians();
     commands.spawn((
         Camera3d::default(),
         Camera::default(),
         Hdr,
         RenderTarget::Image(render_target_handle.clone().into()),
-        Projection::Perspective(PerspectiveProjection {
-            fov,
-            near: config.0.near_plane,
-            far: config.0.far_plane,
-            ..default()
-        }),
+        render_projection(&config.0),
         Msaa::Off,
         Transform::default(),
         Tonemapping::None,
