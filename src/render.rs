@@ -2391,7 +2391,7 @@ fn check_headless_capture_ready(
     // retry. The copier stays enabled until BOTH RGBA and depth are valid so a
     // late/odd depth frame can still be captured.
     if state.rgba_data.is_none() {
-        let captured_rgba = shared_rgba.0.lock().ok().and_then(|g| g.clone());
+        let captured_rgba = shared_rgba.0.lock().ok().and_then(|mut g| g.take());
         if let Some((rgba_data, width, height)) = captured_rgba {
             let non_blank = rgba_data
                 .chunks_exact(4)
@@ -2406,9 +2406,6 @@ fn check_headless_capture_ready(
             } else {
                 // Not settled yet: remember this frame and re-read fresh next one.
                 state.prev_rgba = Some(rgba_data);
-                if let Ok(mut g) = shared_rgba.0.lock() {
-                    *g = None;
-                }
             }
         }
     }
@@ -2416,7 +2413,7 @@ fn check_headless_capture_ready(
     // Depth: accept the first readback that contains real foreground (the depth
     // readback can also miss the geometry, leaving an all-far-plane buffer).
     if state.depth_data.is_none() {
-        let captured_depth = shared_depth.0.lock().ok().and_then(|g| g.clone());
+        let captured_depth = shared_depth.0.lock().ok().and_then(|mut g| g.take());
         if let Some((depth_data, _w, _h)) = captured_depth {
             let far = request.config.far_plane as f64;
             // Require a real object-surface depth, not just any non-far value:
@@ -2430,9 +2427,6 @@ fn check_headless_capture_ready(
                 state.prev_depth = None;
             } else {
                 state.prev_depth = Some(depth_data);
-                if let Ok(mut g) = shared_depth.0.lock() {
-                    *g = None; // discard; retry next frame
-                }
             }
         }
     }
@@ -2503,16 +2497,18 @@ fn extract_and_exit_headless(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    if state.rgba_data.is_some() && state.depth_data.is_some() {
         let width = state.image_width;
         let height = state.image_height;
+        let rgba = state.rgba_data.take().expect("checked rgba_data");
+        let depth = state.depth_data.take().expect("checked depth_data");
 
         // Compute intrinsics from the same TBP zoom formula as the camera projection.
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,
@@ -2581,15 +2577,17 @@ fn extract_and_continue_headless_batch(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    if state.rgba_data.is_some() && state.depth_data.is_some() {
         let width = state.image_width;
         let height = state.image_height;
+        let rgba = state.rgba_data.take().expect("checked rgba_data");
+        let depth = state.depth_data.take().expect("checked depth_data");
 
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,

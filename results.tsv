@@ -1,0 +1,10 @@
+commit	workload	fps	mean_ms	p50_ms	p95_ms	center_hits	blank_frames	judge_verdict	status	description
+34ec2dc	fixed-orbit-3	120.66	8.29	5.35	11.04	141/216	0	PASS	baseline	output/benchmarks/baseline-34ec2dc-fixed-orbit-3
+34ec2dc+no-normal-prepass	fixed-orbit-3	120.61	8.29	4.95	15.42	141/216	0	NA	discard	FPS flat and p95 regressed; output/benchmarks/candidate-no-normal-prepass-fixed-orbit-3
+34ec2dc+move-readbacks	fixed-orbit-3	127.91	7.82	5.00	10.59	141/216	0	PASS	keep	Moved readback buffers instead of cloning; output/benchmarks/candidate-move-readbacks-fixed-orbit-3
+34ec2dc+move-readbacks	fixed-orbit-3	129.85	7.70	4.74	10.94	141/216	0	PASS	keep	Repeat candidate run; output/benchmarks/candidate-move-readbacks-fixed-orbit-3-repeat
+34ec2dc	persistent-smoke	17.88	55.93	7.65	8.31	12/12	0	PASS	baseline	output/benchmarks/baseline-34ec2dc-persistent-smoke; emitted pre-existing loud depth-fallback warning
+34ec2dc+move-readbacks	persistent-smoke	18.55	53.92	7.17	7.53	12/12	0	PASS	keep	Moved readback buffers instead of cloning; output/benchmarks/candidate-move-readbacks-persistent-smoke; same loud depth-fallback warning observed
+34ec2dc+move-readbacks	persistent-smoke	18.50	54.05	7.28	8.00	12/12	0	PASS	keep	Repeat candidate run; output/benchmarks/candidate-move-readbacks-persistent-smoke-repeat; same loud depth-fallback warning observed
+7bbc05f	fixed-orbit-10	140.93	7.10	5.45	10.41	417/720	0	PASS	keep	Broad RenderSession health gate; output/benchmarks/post-7bbc05f-fixed-orbit-10
+7bbc05f	persistent-surface	82.75	12.09	7.48	8.10	105/120	0	PASS	keep	Broad PersistentRenderer health gate; output/benchmarks/post-7bbc05f-persistent-surface; same loud depth-fallback warning observed
