@@ -119,6 +119,13 @@ const BATCH_WARMUP_FRAMES: u32 = 1;
 ///   - tick 3: shared buffers populated → captured → batch finalized
 const PERSISTENT_WARMUP_FRAMES: u32 = 3;
 
+fn persistent_warmup_camera_transform() -> Transform {
+    crate::generate_viewpoints(&crate::ViewpointConfig::default())
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Transform::from_xyz(0.0, 0.0, 0.5).looking_at(Vec3::ZERO, Vec3::Y))
+}
+
 /// Check the render-trace env var. Cheap enough (single HashMap lookup) to call
 /// from per-frame systems; gate all tracing output behind this.
 #[inline]
@@ -3271,11 +3278,15 @@ impl PersistentRenderer {
 
         // Install scene + warmup render request. The warmup output is discarded
         // — its purpose is to pay PSO compilation and material application
-        // upfront so the first user-facing render() is fast.
+        // upfront so the first user-facing render() is fast. Use a real TBP
+        // viewpoint rather than Transform::default(), which places the camera
+        // at the object origin and forces a flat-depth fallback before any
+        // caller-requested surface-policy render runs.
+        let warmup_camera = persistent_warmup_camera_transform();
         let initial_request = RenderRequest {
             mesh_path: fs_path_to_asset_string(&mesh_path),
             texture_path: fs_path_to_asset_string(&texture_path),
-            camera_transform: Transform::default(),
+            camera_transform: warmup_camera,
             object_rotation: ObjectRotation::identity(),
             object_translation: Vec3::ZERO,
             object_scale: Vec3::ONE,
@@ -3299,7 +3310,16 @@ impl PersistentRenderer {
                 RenderedObject,
                 PersistentScene,
             ));
-            world.insert_resource(HeadlessBatchSequence::new(vec![Transform::default()]));
+            if let Some(cam) = world
+                .query_filtered::<Entity, With<RenderCamera>>()
+                .iter(world)
+                .next()
+            {
+                if let Some(mut transform) = world.entity_mut(cam).get_mut::<Transform>() {
+                    *transform = warmup_camera;
+                }
+            }
+            world.insert_resource(HeadlessBatchSequence::new(vec![warmup_camera]));
         }
 
         // Drive the warmup render to completion.
@@ -3624,7 +3644,10 @@ fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod smoke_tests {
-    use super::{headless_scene_setup_count, reset_headless_scene_setup_count};
+    use super::{
+        headless_scene_setup_count, persistent_warmup_camera_transform,
+        reset_headless_scene_setup_count,
+    };
     use crate::{
         BatchRenderConfig, BatchRenderRequest, ObjectRotation, RenderConfig, TargetingPolicy, Vec3,
         ViewpointConfig,
@@ -3678,6 +3701,22 @@ f 5/1 2/3 1/4
             .expect("write synthetic texture");
 
         temp_dir
+    }
+
+    #[test]
+    fn persistent_warmup_camera_is_a_real_viewpoint() {
+        let transform = persistent_warmup_camera_transform();
+        assert!(
+            transform.translation.length() > 0.1,
+            "persistent warmup must not place the camera at the object origin"
+        );
+
+        let forward = transform.rotation * Vec3::NEG_Z;
+        let to_origin = -transform.translation.normalize();
+        assert!(
+            forward.dot(to_origin) > 0.99,
+            "persistent warmup camera should look at the object origin"
+        );
     }
 
     #[test]
