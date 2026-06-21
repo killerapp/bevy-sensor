@@ -118,7 +118,7 @@ const BATCH_WARMUP_FRAMES: u32 = 1;
 ///   - tick 2: warmup hits 0, capture fires, render runs with copy enabled
 ///   - tick 3: shared buffers populated → captured → batch finalized
 const PERSISTENT_WARMUP_FRAMES: u32 = 3;
-const DEPTH_CAPTURE_MIN_FOREGROUND_METERS: f64 = 0.1;
+const DEPTH_CAPTURE_NEAR_PLANE_EPSILON_METERS: f64 = 1e-5;
 const DEPTH_CAPTURE_FAR_PLANE_FRACTION: f64 = 0.999;
 
 fn persistent_warmup_camera_transform() -> Transform {
@@ -135,10 +135,11 @@ fn render_trace_enabled() -> bool {
     std::env::var("BEVY_SENSOR_RENDER_TRACE").is_ok()
 }
 
-fn is_capture_foreground_depth(depth: f64, far: f64) -> bool {
+fn is_capture_foreground_depth(depth: f64, near: f64, far: f64) -> bool {
     depth.is_finite()
+        && near.is_finite()
         && far.is_finite()
-        && depth > DEPTH_CAPTURE_MIN_FOREGROUND_METERS
+        && depth > near + DEPTH_CAPTURE_NEAR_PLANE_EPSILON_METERS
         && depth < far * DEPTH_CAPTURE_FAR_PLANE_FRACTION
 }
 
@@ -157,7 +158,7 @@ struct DepthReadbackSummary {
 }
 
 impl DepthReadbackSummary {
-    fn from_depth(depth: &[f64], far: f64) -> Self {
+    fn from_depth(depth: &[f64], near: f64, far: f64) -> Self {
         let mut summary = Self {
             samples: depth.len(),
             finite: 0,
@@ -170,6 +171,7 @@ impl DepthReadbackSummary {
             foreground_min: None,
             foreground_max: None,
         };
+        let near_threshold = near + DEPTH_CAPTURE_NEAR_PLANE_EPSILON_METERS;
         let far_threshold = far * DEPTH_CAPTURE_FAR_PLANE_FRACTION;
 
         for &value in depth {
@@ -182,13 +184,13 @@ impl DepthReadbackSummary {
             summary.min = Some(summary.min.map_or(value, |min| min.min(value)));
             summary.max = Some(summary.max.map_or(value, |max| max.max(value)));
 
-            if value <= DEPTH_CAPTURE_MIN_FOREGROUND_METERS {
+            if value <= near_threshold {
                 summary.near_or_zero += 1;
             } else if !far.is_finite() || value >= far_threshold {
                 summary.far_or_background += 1;
             }
 
-            if is_capture_foreground_depth(value, far) {
+            if is_capture_foreground_depth(value, near, far) {
                 summary.foreground += 1;
                 summary.foreground_min =
                     Some(summary.foreground_min.map_or(value, |min| min.min(value)));
@@ -2555,13 +2557,16 @@ fn check_headless_capture_ready(
     if state.depth_data.is_none() {
         let captured_depth = shared_depth.0.lock().ok().and_then(|mut g| g.take());
         if let Some((depth_data, _w, _h)) = captured_depth {
+            let near = request.config.near_plane as f64;
             let far = request.config.far_plane as f64;
             // Require a real object-surface depth, not just any non-far value:
-            // near-plane garbage (~0.01) would otherwise be accepted but is not a
-            // valid surface, and downstream depth-validity checks require > 0.1m.
+            // near-plane garbage (~configured near plane) is not a valid surface,
+            // but TBP surface policies legitimately work close to the object
+            // (~0.025m with the default 0.01m near plane), so do not use a broad
+            // absolute floor like 0.1m here.
             let has_foreground = depth_data
                 .iter()
-                .any(|&depth| is_capture_foreground_depth(depth, far));
+                .any(|&depth| is_capture_foreground_depth(depth, near, far));
             // Settled == identical to the previous depth readback.
             let stable = state.prev_depth.as_deref() == Some(depth_data.as_slice());
             if has_foreground && stable {
@@ -2589,7 +2594,13 @@ fn check_headless_capture_ready(
         let depth_summary = state
             .prev_depth
             .as_deref()
-            .map(|depth| DepthReadbackSummary::from_depth(depth, request.config.far_plane as f64))
+            .map(|depth| {
+                DepthReadbackSummary::from_depth(
+                    depth,
+                    request.config.near_plane as f64,
+                    request.config.far_plane as f64,
+                )
+            })
             .map(|summary| summary.to_string())
             .unwrap_or_else(|| "none".to_string());
         let camera_translation = request.camera_transform.translation;
@@ -3777,16 +3788,21 @@ mod depth_readback_summary_tests {
 
     #[test]
     fn capture_foreground_depth_matches_persistent_capture_gate() {
-        assert!(!is_capture_foreground_depth(0.1, 10.0));
-        assert!(is_capture_foreground_depth(0.1001, 10.0));
-        assert!(is_capture_foreground_depth(9.98, 10.0));
-        assert!(!is_capture_foreground_depth(9.99, 10.0));
-        assert!(!is_capture_foreground_depth(f64::NAN, 10.0));
+        let near = 0.01;
+        let far = 10.0;
+
+        assert!(!is_capture_foreground_depth(near, near, far));
+        assert!(!is_capture_foreground_depth(0.010005, near, far));
+        assert!(is_capture_foreground_depth(0.01002, near, far));
+        assert!(is_capture_foreground_depth(0.025, near, far));
+        assert!(is_capture_foreground_depth(9.98, near, far));
+        assert!(!is_capture_foreground_depth(9.99, near, far));
+        assert!(!is_capture_foreground_depth(f64::NAN, near, far));
     }
 
     #[test]
     fn depth_readback_summary_classifies_all_far_frames() {
-        let summary = DepthReadbackSummary::from_depth(&[10.0, 10.0, 9.99], 10.0);
+        let summary = DepthReadbackSummary::from_depth(&[10.0, 10.0, 9.99], 0.01, 10.0);
 
         assert_eq!(summary.samples, 3);
         assert_eq!(summary.finite, 3);
@@ -3802,7 +3818,8 @@ mod depth_readback_summary_tests {
 
     #[test]
     fn depth_readback_summary_keeps_foreground_range_when_depth_exists() {
-        let summary = DepthReadbackSummary::from_depth(&[0.0, 0.05, 0.25, 1.5, 10.0], 10.0);
+        let summary =
+            DepthReadbackSummary::from_depth(&[0.0, 0.010005, 0.025, 1.5, 10.0], 0.01, 10.0);
 
         assert_eq!(summary.samples, 5);
         assert_eq!(summary.finite, 5);
@@ -3811,13 +3828,13 @@ mod depth_readback_summary_tests {
         assert_eq!(summary.far_or_background, 1);
         assert_eq!(summary.min, Some(0.0));
         assert_eq!(summary.max, Some(10.0));
-        assert_eq!(summary.foreground_min, Some(0.25));
+        assert_eq!(summary.foreground_min, Some(0.025));
         assert_eq!(summary.foreground_max, Some(1.5));
     }
 
     #[test]
     fn depth_readback_summary_counts_invalid_samples() {
-        let summary = DepthReadbackSummary::from_depth(&[f64::NAN, f64::INFINITY, 0.2], 10.0);
+        let summary = DepthReadbackSummary::from_depth(&[f64::NAN, f64::INFINITY, 0.2], 0.01, 10.0);
 
         assert_eq!(summary.samples, 3);
         assert_eq!(summary.finite, 1);
