@@ -20,7 +20,7 @@ use bevy_sensor::ycbust;
 use bevy_sensor::{
     generate_targeted_viewpoints, render_batch, validate_center_hits, BatchRenderConfig,
     BatchRenderOutput, BatchRenderRequest, MeshBoundsMetadata, ObjectRotation, RenderConfig,
-    RenderHealth, RenderStatus, TargetingPolicy, ViewpointConfig, RENDERER_POLICY_VERSION,
+    RenderHealth, RenderStatus, TargetingPolicy, Vec3, ViewpointConfig, RENDERER_POLICY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,6 +83,8 @@ pub struct RenderMetadata {
     pub rotation_euler: [f32; 3],
     pub camera_position: [f32; 3],
     pub camera_rotation_xyzw: [f32; 4],
+    pub object_translation: [f32; 3],
+    pub object_scale: [f32; 3],
     pub target_point: [f32; 3],
     pub targeting_policy: TargetingPolicy,
     pub mesh_bounds: Option<MeshBoundsMetadata>,
@@ -455,6 +457,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     object_dir: object_dir.clone(),
                     viewpoint: *viewpoint,
                     object_rotation: rotation.clone(),
+                    object_translation: Vec3::ZERO,
+                    object_scale: Vec3::ONE,
                     render_config: render_config.clone(),
                     target_point: targeted.target_point,
                     targeting_policy: target_policy.clone(),
@@ -484,6 +488,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
                 let camera_pos = output.request.viewpoint.translation;
                 let camera_rot = output.request.viewpoint.rotation;
+                let object_translation = output.object_translation;
+                let object_scale = output.object_scale;
                 object_renders.push(RenderMetadata {
                     object_id: object_id.clone(),
                     rotation_index: rot_idx,
@@ -496,6 +502,8 @@ fn run_batch_render_impl(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     ],
                     camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
                     camera_rotation_xyzw: [camera_rot.x, camera_rot.y, camera_rot.z, camera_rot.w],
+                    object_translation: object_translation.to_array(),
+                    object_scale: object_scale.to_array(),
                     target_point: output.target_point.to_array(),
                     targeting_policy: output.targeting_policy.clone(),
                     mesh_bounds: targeted.mesh_bounds.map(MeshBoundsMetadata::from),

@@ -119,6 +119,13 @@ const BATCH_WARMUP_FRAMES: u32 = 1;
 ///   - tick 3: shared buffers populated → captured → batch finalized
 const PERSISTENT_WARMUP_FRAMES: u32 = 3;
 
+fn persistent_warmup_camera_transform() -> Transform {
+    crate::generate_viewpoints(&crate::ViewpointConfig::default())
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Transform::from_xyz(0.0, 0.0, 0.5).looking_at(Vec3::ZERO, Vec3::Y))
+}
+
 /// Check the render-trace env var. Cheap enough (single HashMap lookup) to call
 /// from per-frame systems; gate all tracing output behind this.
 #[inline]
@@ -1227,6 +1234,8 @@ struct RenderRequest {
     texture_path: String,
     camera_transform: Transform,
     object_rotation: ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: RenderConfig,
 }
 
@@ -1295,6 +1304,8 @@ pub fn render_headless(
     object_dir: &Path,
     camera_transform: &Transform,
     object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: &RenderConfig,
 ) -> Result<RenderOutput, RenderError> {
     // Canonicalize paths so Bevy's asset server can find them regardless of
@@ -1326,6 +1337,8 @@ pub fn render_headless(
         texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
+        object_translation,
+        object_scale,
         config: config.clone(),
     };
 
@@ -1404,6 +1417,8 @@ pub fn render_headless_sequence(
     object_dir: &Path,
     viewpoints: &[Transform],
     object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: &RenderConfig,
 ) -> Result<Vec<RenderOutput>, RenderError> {
     if viewpoints.is_empty() {
@@ -1436,6 +1451,8 @@ pub fn render_headless_sequence(
         texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: viewpoints[0],
         object_rotation: object_rotation.clone(),
+        object_translation,
+        object_scale,
         config: config.clone(),
     };
 
@@ -1701,6 +1718,16 @@ fn serialize_output(output: &RenderOutput) -> Vec<u8> {
     data.extend_from_slice(&or.yaw.to_le_bytes());
     data.extend_from_slice(&or.roll.to_le_bytes());
 
+    // Object translation + scale (f32 for Bevy compatibility)
+    let ot = output.object_translation;
+    let os = output.object_scale;
+    data.extend_from_slice(&ot.x.to_le_bytes());
+    data.extend_from_slice(&ot.y.to_le_bytes());
+    data.extend_from_slice(&ot.z.to_le_bytes());
+    data.extend_from_slice(&os.x.to_le_bytes());
+    data.extend_from_slice(&os.y.to_le_bytes());
+    data.extend_from_slice(&os.z.to_le_bytes());
+
     data
 }
 
@@ -1764,6 +1791,18 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
     let yaw = read_f64(&data, &mut cursor);
     let roll = read_f64(&data, &mut cursor);
 
+    let (object_translation, object_scale) = if cursor + 24 <= data.len() {
+        let tx = read_f32(&data, &mut cursor);
+        let ty = read_f32(&data, &mut cursor);
+        let tz = read_f32(&data, &mut cursor);
+        let sx = read_f32(&data, &mut cursor);
+        let sy = read_f32(&data, &mut cursor);
+        let sz = read_f32(&data, &mut cursor);
+        (Vec3::new(tx, ty, tz), Vec3::new(sx, sy, sz))
+    } else {
+        (Vec3::ZERO, Vec3::ONE)
+    };
+
     Ok(RenderOutput {
         rgba,
         depth,
@@ -1780,6 +1819,8 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
             scale: Vec3::ONE,
         },
         object_rotation: ObjectRotation { pitch, yaw, roll },
+        object_translation,
+        object_scale,
         target_point: Vec3::ZERO,
         targeting_policy: TargetingPolicy::Origin,
     })
@@ -1865,10 +1906,12 @@ fn setup_scene(
         ..default()
     });
 
-    // Spawn the scene with rotation (Bevy 0.15+ uses SceneRoot)
+    // Spawn the scene with the requested object transform (Bevy 0.15+ uses SceneRoot)
     commands.spawn((
         SceneRoot(scene_handle),
-        Transform::from_rotation(request.object_rotation.to_quat()),
+        request
+            .object_rotation
+            .to_transform_with_translation_scale(request.object_translation, request.object_scale),
         RenderedObject,
     ));
 
@@ -2146,6 +2189,8 @@ fn extract_and_exit(
             intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
+            object_translation: request.object_translation,
+            object_scale: request.object_scale,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2289,10 +2334,12 @@ fn setup_headless_scene(
         ..default()
     });
 
-    // Spawn the scene with rotation
+    // Spawn the scene with the requested object transform
     commands.spawn((
         SceneRoot(scene_handle),
-        Transform::from_rotation(request.object_rotation.to_quat()),
+        request
+            .object_rotation
+            .to_transform_with_translation_scale(request.object_translation, request.object_scale),
         RenderedObject,
     ));
 
@@ -2391,7 +2438,7 @@ fn check_headless_capture_ready(
     // retry. The copier stays enabled until BOTH RGBA and depth are valid so a
     // late/odd depth frame can still be captured.
     if state.rgba_data.is_none() {
-        let captured_rgba = shared_rgba.0.lock().ok().and_then(|g| g.clone());
+        let captured_rgba = shared_rgba.0.lock().ok().and_then(|mut g| g.take());
         if let Some((rgba_data, width, height)) = captured_rgba {
             let non_blank = rgba_data
                 .chunks_exact(4)
@@ -2406,9 +2453,6 @@ fn check_headless_capture_ready(
             } else {
                 // Not settled yet: remember this frame and re-read fresh next one.
                 state.prev_rgba = Some(rgba_data);
-                if let Ok(mut g) = shared_rgba.0.lock() {
-                    *g = None;
-                }
             }
         }
     }
@@ -2416,7 +2460,7 @@ fn check_headless_capture_ready(
     // Depth: accept the first readback that contains real foreground (the depth
     // readback can also miss the geometry, leaving an all-far-plane buffer).
     if state.depth_data.is_none() {
-        let captured_depth = shared_depth.0.lock().ok().and_then(|g| g.clone());
+        let captured_depth = shared_depth.0.lock().ok().and_then(|mut g| g.take());
         if let Some((depth_data, _w, _h)) = captured_depth {
             let far = request.config.far_plane as f64;
             // Require a real object-surface depth, not just any non-far value:
@@ -2430,9 +2474,6 @@ fn check_headless_capture_ready(
                 state.prev_depth = None;
             } else {
                 state.prev_depth = Some(depth_data);
-                if let Ok(mut g) = shared_depth.0.lock() {
-                    *g = None; // discard; retry next frame
-                }
             }
         }
     }
@@ -2503,21 +2544,25 @@ fn extract_and_exit_headless(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    if state.rgba_data.is_some() && state.depth_data.is_some() {
         let width = state.image_width;
         let height = state.image_height;
+        let rgba = state.rgba_data.take().expect("checked rgba_data");
+        let depth = state.depth_data.take().expect("checked depth_data");
 
         // Compute intrinsics from the same TBP zoom formula as the camera projection.
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
+            object_translation: request.object_translation,
+            object_scale: request.object_scale,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2581,15 +2626,17 @@ fn extract_and_continue_headless_batch(
         return;
     }
 
-    if let (Some(rgba), Some(depth)) = (&state.rgba_data, &state.depth_data) {
+    if state.rgba_data.is_some() && state.depth_data.is_some() {
         let width = state.image_width;
         let height = state.image_height;
+        let rgba = state.rgba_data.take().expect("checked rgba_data");
+        let depth = state.depth_data.take().expect("checked depth_data");
 
         let intrinsics = request.config.intrinsics_for_size(width, height);
 
         let output = RenderOutput {
-            rgba: rgba.clone(),
-            depth: depth.clone(),
+            rgba,
+            depth,
             width,
             height,
             intrinsics,
@@ -2597,6 +2644,8 @@ fn extract_and_continue_headless_batch(
                 .current_viewpoint()
                 .unwrap_or(request.camera_transform),
             object_rotation: request.object_rotation.clone(),
+            object_translation: request.object_translation,
+            object_scale: request.object_scale,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2922,11 +2971,13 @@ impl RenderSession {
         for r in &requests[1..] {
             if r.object_dir != first.object_dir
                 || r.object_rotation != first.object_rotation
+                || r.object_translation != first.object_translation
+                || r.object_scale != first.object_scale
                 || r.render_config != first.render_config
             {
                 return Err(BatchRenderError::InvalidConfig(
                     "Phase 1 RenderSession::render requires homogeneous requests \
-                     (same object_dir, object_rotation, and render_config across the batch). \
+                     (same object_dir, object transform, and render_config across the batch). \
                      Call render() once per group instead."
                         .to_string(),
                 ));
@@ -2993,6 +3044,8 @@ impl RenderSession {
                 texture_path: fs_path_to_asset_string(&texture_path),
                 camera_transform: viewpoints[0],
                 object_rotation: first.object_rotation.clone(),
+                object_translation: first.object_translation,
+                object_scale: first.object_scale,
                 config: self.render_config.clone(),
             };
             world.insert_resource(new_request);
@@ -3011,7 +3064,10 @@ impl RenderSession {
             // render() call.
             world.spawn((
                 SceneRoot(scene_handle),
-                Transform::from_rotation(first.object_rotation.to_quat()),
+                first.object_rotation.to_transform_with_translation_scale(
+                    first.object_translation,
+                    first.object_scale,
+                ),
                 RenderedObject,
                 SessionScene,
             ));
@@ -3222,12 +3278,18 @@ impl PersistentRenderer {
 
         // Install scene + warmup render request. The warmup output is discarded
         // — its purpose is to pay PSO compilation and material application
-        // upfront so the first user-facing render() is fast.
+        // upfront so the first user-facing render() is fast. Use a real TBP
+        // viewpoint rather than Transform::default(), which places the camera
+        // at the object origin and forces a flat-depth fallback before any
+        // caller-requested surface-policy render runs.
+        let warmup_camera = persistent_warmup_camera_transform();
         let initial_request = RenderRequest {
             mesh_path: fs_path_to_asset_string(&mesh_path),
             texture_path: fs_path_to_asset_string(&texture_path),
-            camera_transform: Transform::default(),
+            camera_transform: warmup_camera,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             config: render_config.clone(),
         };
 
@@ -3243,11 +3305,21 @@ impl PersistentRenderer {
             world.insert_resource(initial_request);
             world.spawn((
                 SceneRoot(scene_handle),
-                Transform::from_rotation(ObjectRotation::identity().to_quat()),
+                ObjectRotation::identity()
+                    .to_transform_with_translation_scale(Vec3::ZERO, Vec3::ONE),
                 RenderedObject,
                 PersistentScene,
             ));
-            world.insert_resource(HeadlessBatchSequence::new(vec![Transform::default()]));
+            if let Some(cam) = world
+                .query_filtered::<Entity, With<RenderCamera>>()
+                .iter(world)
+                .next()
+            {
+                if let Some(mut transform) = world.entity_mut(cam).get_mut::<Transform>() {
+                    *transform = warmup_camera;
+                }
+            }
+            world.insert_resource(HeadlessBatchSequence::new(vec![warmup_camera]));
         }
 
         // Drive the warmup render to completion.
@@ -3288,6 +3360,17 @@ impl PersistentRenderer {
         camera_transform: &Transform,
         object_rotation: &ObjectRotation,
     ) -> Result<RenderOutput, crate::RenderError> {
+        self.render_with_object_transform(camera_transform, object_rotation, Vec3::ZERO, Vec3::ONE)
+    }
+
+    /// Render one frame with explicit object translation and scale.
+    pub fn render_with_object_transform(
+        &mut self,
+        camera_transform: &Transform,
+        object_rotation: &ObjectRotation,
+        object_translation: Vec3,
+        object_scale: Vec3,
+    ) -> Result<RenderOutput, crate::RenderError> {
         let camera_transform = *camera_transform;
         let object_rotation_owned = object_rotation.clone();
 
@@ -3303,7 +3386,8 @@ impl PersistentRenderer {
                 .next();
             if let Some(entity) = scene_entity {
                 if let Some(mut transform) = world.entity_mut(entity).get_mut::<Transform>() {
-                    *transform = Transform::from_rotation(object_rotation_owned.to_quat());
+                    *transform = object_rotation_owned
+                        .to_transform_with_translation_scale(object_translation, object_scale);
                 }
             }
 
@@ -3363,6 +3447,8 @@ impl PersistentRenderer {
                 let mut req = world.resource_mut::<RenderRequest>();
                 req.camera_transform = camera_transform;
                 req.object_rotation = object_rotation_owned.clone();
+                req.object_translation = object_translation;
+                req.object_scale = object_scale;
             }
 
             // Install fresh single-element batch with warmup frames so
@@ -3420,10 +3506,13 @@ impl PersistentRenderer {
 ///
 /// This function saves RGBA and depth data directly to files before exiting.
 /// Designed for subprocess rendering where the process will exit after rendering.
+#[allow(clippy::too_many_arguments)]
 pub fn render_to_files(
     object_dir: &Path,
     camera_transform: &Transform,
     object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: &RenderConfig,
     rgba_path: &Path,
     depth_path: &Path,
@@ -3447,6 +3536,8 @@ pub fn render_to_files(
         texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
+        object_translation,
+        object_scale,
         config: config.clone(),
     };
 
@@ -3553,7 +3644,10 @@ fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod smoke_tests {
-    use super::{headless_scene_setup_count, reset_headless_scene_setup_count};
+    use super::{
+        headless_scene_setup_count, persistent_warmup_camera_transform,
+        reset_headless_scene_setup_count,
+    };
     use crate::{
         BatchRenderConfig, BatchRenderRequest, ObjectRotation, RenderConfig, TargetingPolicy, Vec3,
         ViewpointConfig,
@@ -3610,6 +3704,22 @@ f 5/1 2/3 1/4
     }
 
     #[test]
+    fn persistent_warmup_camera_is_a_real_viewpoint() {
+        let transform = persistent_warmup_camera_transform();
+        assert!(
+            transform.translation.length() > 0.1,
+            "persistent warmup must not place the camera at the object origin"
+        );
+
+        let forward = transform.rotation * Vec3::NEG_Z;
+        let to_origin = -transform.translation.normalize();
+        assert!(
+            forward.dot(to_origin) > 0.99,
+            "persistent warmup camera should look at the object origin"
+        );
+    }
+
+    #[test]
     #[ignore = "headless throughput smoke check is opt-in because it needs a local render backend"]
     fn test_headless_batch_throughput_smoke() {
         crate::initialize();
@@ -3629,6 +3739,8 @@ f 5/1 2/3 1/4
                 object_dir: object_dir.clone(),
                 viewpoint,
                 object_rotation: ObjectRotation::identity(),
+                object_translation: Vec3::ZERO,
+                object_scale: Vec3::ONE,
                 render_config: config.clone(),
                 target_point: Vec3::ZERO,
                 targeting_policy: TargetingPolicy::Origin,

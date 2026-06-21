@@ -62,6 +62,9 @@ mod render;
 // Batch rendering API for efficient multi-viewpoint rendering
 pub mod batch;
 
+// Benchmark helpers for renderer throughput artifacts
+pub mod benchmark;
+
 // WebGPU and cross-platform backend support
 pub mod backend;
 
@@ -289,6 +292,15 @@ impl ObjectRotation {
     /// Convert to Bevy Transform (rotation only, no translation)
     pub fn to_transform(&self) -> Transform {
         Transform::from_rotation(self.to_quat())
+    }
+
+    /// Convert to a full Bevy Transform with caller-provided translation and scale.
+    pub fn to_transform_with_translation_scale(&self, translation: Vec3, scale: Vec3) -> Transform {
+        Transform {
+            translation,
+            rotation: self.to_quat(),
+            scale,
+        }
     }
 }
 
@@ -878,6 +890,10 @@ pub struct RenderOutput {
     pub camera_transform: Transform,
     /// Object rotation applied during render
     pub object_rotation: ObjectRotation,
+    /// Object world translation applied during render
+    pub object_translation: Vec3,
+    /// Object scale applied during render
+    pub object_scale: Vec3,
     /// Point the camera was intended to target for this render.
     pub target_point: Vec3,
     /// Policy used to derive `target_point`.
@@ -951,6 +967,13 @@ impl RenderOutput {
     pub fn with_targeting(mut self, target_point: Vec3, targeting_policy: TargetingPolicy) -> Self {
         self.target_point = target_point;
         self.targeting_policy = targeting_policy;
+        self
+    }
+
+    /// Attach the object translation/scale metadata used for the render.
+    pub fn with_object_transform(mut self, object_translation: Vec3, object_scale: Vec3) -> Self {
+        self.object_translation = object_translation;
+        self.object_scale = object_scale;
         self
     }
 
@@ -1296,7 +1319,33 @@ pub fn render_to_buffer(
     config: &RenderConfig,
 ) -> Result<RenderOutput, RenderError> {
     // Use the actual Bevy headless renderer
-    render::render_headless(object_dir, camera_transform, object_rotation, config)
+    render::render_headless(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        Vec3::ZERO,
+        Vec3::ONE,
+        config,
+    )
+}
+
+/// Render a YCB object with an explicit object translation and scale.
+pub fn render_to_buffer_with_object_transform(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
+    config: &RenderConfig,
+) -> Result<RenderOutput, RenderError> {
+    render::render_headless(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        object_translation,
+        object_scale,
+        config,
+    )
 }
 
 /// Render a YCB object and attach the target metadata used for the camera pose.
@@ -1314,6 +1363,29 @@ pub fn render_to_buffer_with_target(
 ) -> Result<RenderOutput, RenderError> {
     render_to_buffer(object_dir, camera_transform, object_rotation, config)
         .map(|output| output.with_targeting(target_point, targeting_policy))
+}
+
+/// Render a YCB object with explicit object transform and target metadata.
+#[allow(clippy::too_many_arguments)]
+pub fn render_to_buffer_with_target_and_object_transform(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
+    config: &RenderConfig,
+    target_point: Vec3,
+    targeting_policy: TargetingPolicy,
+) -> Result<RenderOutput, RenderError> {
+    render_to_buffer_with_object_transform(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        object_translation,
+        object_scale,
+        config,
+    )
+    .map(|output| output.with_targeting(target_point, targeting_policy))
 }
 
 /// Render all viewpoints and rotations for a YCB object.
@@ -1443,6 +1515,8 @@ pub fn validate_center_hits(
                 object_dir: PathBuf::from(object_dir),
                 viewpoint: *viewpoint,
                 object_rotation: rotation.clone(),
+                object_translation: Vec3::ZERO,
+                object_scale: Vec3::ONE,
                 render_config: render_config.clone(),
                 target_point: targeted.target_point,
                 targeting_policy: target_policy.clone(),
@@ -1577,6 +1651,27 @@ pub fn render_to_buffer_cached(
     config: &RenderConfig,
     cache: &mut cache::ModelCache,
 ) -> Result<RenderOutput, RenderError> {
+    render_to_buffer_cached_with_object_transform(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        Vec3::ZERO,
+        Vec3::ONE,
+        config,
+        cache,
+    )
+}
+
+/// Render using the model cache with explicit object translation and scale.
+pub fn render_to_buffer_cached_with_object_transform(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
+    config: &RenderConfig,
+    cache: &mut cache::ModelCache,
+) -> Result<RenderOutput, RenderError> {
     let mesh_path = object_dir.join("google_16k/textured.obj");
     let texture_path = object_dir.join("google_16k/texture_map.png");
 
@@ -1585,7 +1680,14 @@ pub fn render_to_buffer_cached(
     cache.cache_texture(texture_path.clone());
 
     // Render using standard pipeline
-    render::render_headless(object_dir, camera_transform, object_rotation, config)
+    render::render_headless(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        object_translation,
+        object_scale,
+        config,
+    )
 }
 
 /// Render directly to files (for subprocess mode).
@@ -1612,10 +1714,36 @@ pub fn render_to_files(
     rgba_path: &Path,
     depth_path: &Path,
 ) -> Result<(), RenderError> {
+    render_to_files_with_object_transform(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        Vec3::ZERO,
+        Vec3::ONE,
+        config,
+        rgba_path,
+        depth_path,
+    )
+}
+
+/// Render directly to files with explicit object translation and scale.
+#[allow(clippy::too_many_arguments)]
+pub fn render_to_files_with_object_transform(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
+    config: &RenderConfig,
+    rgba_path: &Path,
+    depth_path: &Path,
+) -> Result<(), RenderError> {
     render::render_to_files(
         object_dir,
         camera_transform,
         object_rotation,
+        object_translation,
+        object_scale,
         config,
         rgba_path,
         depth_path,
@@ -1721,10 +1849,12 @@ pub fn render_next_in_batch(
     _timeout_ms: u32,
 ) -> Result<Option<BatchRenderOutput>, RenderError> {
     if let Some(request) = renderer.pending_requests.pop_front() {
-        let output = render_to_buffer(
+        let output = render_to_buffer_with_object_transform(
             &request.object_dir,
             &request.viewpoint,
             &request.object_rotation,
+            request.object_translation,
+            request.object_scale,
             &request.render_config,
         )?;
         let batch_output = BatchRenderOutput::from_render_output(request, output);
@@ -1769,6 +1899,8 @@ pub fn render_batch(
             &first_request.object_dir,
             &viewpoints,
             &first_request.object_rotation,
+            first_request.object_translation,
+            first_request.object_scale,
             &first_request.render_config,
         )?;
 
@@ -1803,6 +1935,8 @@ fn requests_share_batch_context(requests: &[BatchRenderRequest]) -> bool {
     requests.iter().all(|request| {
         request.object_dir == first.object_dir
             && request.object_rotation == first.object_rotation
+            && request.object_translation == first.object_translation
+            && request.object_scale == first.object_scale
             && request.render_config == first.render_config
     })
 }
@@ -1850,6 +1984,8 @@ mod tests {
             intrinsics,
             camera_transform,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         }
@@ -1878,6 +2014,8 @@ mod tests {
             object_dir: "/tmp/ycb/003_cracker_box".into(),
             viewpoint: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: config.clone(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -1899,6 +2037,8 @@ mod tests {
             object_dir: "/tmp/ycb/003_cracker_box".into(),
             viewpoint: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: config.clone(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -1908,6 +2048,52 @@ mod tests {
             request.clone(),
             BatchRenderRequest {
                 object_dir: "/tmp/ycb/005_tomato_soup_can".into(),
+                ..request
+            },
+        ]));
+    }
+
+    #[test]
+    fn test_requests_share_batch_context_rejects_mixed_object_translation() {
+        let config = RenderConfig::tbp_default();
+        let request = BatchRenderRequest {
+            object_dir: "/tmp/ycb/003_cracker_box".into(),
+            viewpoint: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
+            render_config: config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
+        };
+
+        assert!(!requests_share_batch_context(&[
+            request.clone(),
+            BatchRenderRequest {
+                object_translation: Vec3::new(0.1, 0.0, 0.0),
+                ..request
+            },
+        ]));
+    }
+
+    #[test]
+    fn test_requests_share_batch_context_rejects_mixed_object_scale() {
+        let config = RenderConfig::tbp_default();
+        let request = BatchRenderRequest {
+            object_dir: "/tmp/ycb/003_cracker_box".into(),
+            viewpoint: Transform::IDENTITY,
+            object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
+            render_config: config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
+        };
+
+        assert!(!requests_share_batch_context(&[
+            request.clone(),
+            BatchRenderRequest {
+                object_scale: Vec3::splat(1.25),
                 ..request
             },
         ]));
@@ -2368,6 +2554,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2394,6 +2582,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2417,6 +2607,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2440,6 +2632,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2669,6 +2863,18 @@ mod tests {
     }
 
     #[test]
+    fn test_object_rotation_to_transform_with_translation_scale() {
+        let rot = ObjectRotation::new(0.0, 90.0, 0.0);
+        let translation = Vec3::new(0.25, -0.5, 1.25);
+        let scale = Vec3::new(1.0, 1.5, 0.75);
+        let transform = rot.to_transform_with_translation_scale(translation, scale);
+
+        assert_eq!(transform.translation, translation);
+        assert_eq!(transform.scale, scale);
+        assert_eq!(transform.rotation, rot.to_quat());
+    }
+
+    #[test]
     fn test_viewpoint_config_single_viewpoint() {
         let config = ViewpointConfig {
             radius: 1.0,
@@ -2752,6 +2958,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2773,6 +2981,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::IDENTITY,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };

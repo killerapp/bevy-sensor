@@ -63,6 +63,8 @@ fn synthetic_output(camera_transform: Transform, depth_m: f64) -> RenderOutput {
         intrinsics,
         camera_transform,
         object_rotation: ObjectRotation::identity(),
+        object_translation: Vec3::ZERO,
+        object_scale: Vec3::ONE,
         target_point: Vec3::ZERO,
         targeting_policy: TargetingPolicy::Origin,
     }

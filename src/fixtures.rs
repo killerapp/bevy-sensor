@@ -125,6 +125,10 @@ pub struct RenderMetadata {
     #[serde(default)]
     pub camera_rotation_xyzw: Option<[f32; 4]>,
     #[serde(default)]
+    pub object_translation: Option<[f32; 3]>,
+    #[serde(default)]
+    pub object_scale: Option<[f32; 3]>,
+    #[serde(default)]
     pub target_point: Option<[f32; 3]>,
     #[serde(default)]
     pub targeting_policy: Option<TargetingPolicy>,
@@ -300,6 +304,9 @@ impl TestFixtures {
         let rot = render_meta.rotation_euler;
         let object_rotation =
             crate::ObjectRotation::new(rot[0] as f64, rot[1] as f64, rot[2] as f64);
+        let object_translation =
+            Vec3::from_array(render_meta.object_translation.unwrap_or([0.0, 0.0, 0.0]));
+        let object_scale = Vec3::from_array(render_meta.object_scale.unwrap_or([1.0, 1.0, 1.0]));
 
         Ok(RenderOutput {
             rgba,
@@ -309,6 +316,8 @@ impl TestFixtures {
             intrinsics: self.intrinsics(),
             camera_transform,
             object_rotation,
+            object_translation,
+            object_scale,
             target_point,
             targeting_policy,
         })
@@ -563,6 +572,8 @@ mod tests {
             rotation_euler: [0.0, 90.0, 0.0],
             camera_position: [0.5, 0.0, 0.0],
             camera_rotation_xyzw: Some([0.0, 0.0, 0.0, 1.0]),
+            object_translation: Some([0.1, 0.2, 0.3]),
+            object_scale: Some([1.0, 1.25, 0.75]),
             target_point: Some([0.0, 0.0, 0.0]),
             targeting_policy: Some(TargetingPolicy::Origin),
             mesh_bounds: None,
