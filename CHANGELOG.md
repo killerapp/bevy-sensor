@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1](https://github.com/killerapp/bevy-sensor/compare/v0.8.0...v0.8.1) - 2026-06-21
+
+### Fixed
+
+- accept stable all-background render frames
+
+### Other
+
+- Accept close surface-policy depth frames
+- Add depth fallback diagnostics
+
 ## [0.8.0](https://github.com/killerapp/bevy-sensor/compare/v0.7.2...v0.8.0) - 2026-06-21
 
 ### Added
