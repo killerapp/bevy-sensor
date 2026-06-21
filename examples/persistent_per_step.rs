@@ -108,6 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             object_dir: object_dir.clone(),
             viewpoint: vp,
             object_rotation: rotation.clone(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: render_config.clone(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,

@@ -27,6 +27,8 @@
 //!             object_dir: "/tmp/ycb/003_cracker_box".into(),
 //!             viewpoint,
 //!             object_rotation: rotation.clone(),
+//!             object_translation: Vec3::ZERO,
+//!             object_scale: Vec3::ONE,
 //!             render_config: RenderConfig::tbp_default(),
 //!             target_point: Vec3::ZERO,
 //!             targeting_policy: TargetingPolicy::Origin,
@@ -88,12 +90,51 @@ pub struct BatchRenderRequest {
     pub viewpoint: Transform,
     /// Object rotation to apply
     pub object_rotation: ObjectRotation,
+    /// Object world translation to apply
+    pub object_translation: Vec3,
+    /// Object scale to apply
+    pub object_scale: Vec3,
     /// Render configuration (resolution, lighting, etc.)
     pub render_config: RenderConfig,
     /// Point the camera was intended to target for this render.
     pub target_point: Vec3,
     /// Policy used to derive `target_point`.
     pub targeting_policy: TargetingPolicy,
+}
+
+impl BatchRenderRequest {
+    /// Build a request with the current default object transform: origin translation and unit scale.
+    pub fn new(
+        object_dir: PathBuf,
+        viewpoint: Transform,
+        object_rotation: ObjectRotation,
+        render_config: RenderConfig,
+    ) -> Self {
+        Self {
+            object_dir,
+            viewpoint,
+            object_rotation,
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
+            render_config,
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
+        }
+    }
+
+    /// Attach explicit object translation and scale.
+    pub fn with_object_transform(mut self, object_translation: Vec3, object_scale: Vec3) -> Self {
+        self.object_translation = object_translation;
+        self.object_scale = object_scale;
+        self
+    }
+
+    /// Attach camera-target metadata used to create the request viewpoint.
+    pub fn with_targeting(mut self, target_point: Vec3, targeting_policy: TargetingPolicy) -> Self {
+        self.target_point = target_point;
+        self.targeting_policy = targeting_policy;
+        self
+    }
 }
 
 /// Status of a single render in a batch.
@@ -124,6 +165,10 @@ pub struct BatchRenderOutput {
     pub intrinsics: CameraIntrinsics,
     /// Camera transform used for world-space depth unprojection.
     pub camera_transform: Transform,
+    /// Object world translation applied during render.
+    pub object_translation: Vec3,
+    /// Object scale applied during render.
+    pub object_scale: Vec3,
     /// Point the camera was intended to target for this render.
     pub target_point: Vec3,
     /// Policy used to derive `target_point`.
@@ -206,6 +251,8 @@ impl BatchRenderOutput {
     pub fn from_render_output(request: BatchRenderRequest, output: RenderOutput) -> Self {
         let health = output.health_with_far_plane(request.render_config.far_plane as f64);
         let camera_transform = output.camera_transform;
+        let object_translation = output.object_translation;
+        let object_scale = output.object_scale;
         let target_point = request.target_point;
         let targeting_policy = request.targeting_policy.clone();
         Self {
@@ -216,6 +263,8 @@ impl BatchRenderOutput {
             height: output.height,
             intrinsics: output.intrinsics,
             camera_transform,
+            object_translation,
+            object_scale,
             target_point,
             targeting_policy,
             health,
@@ -384,6 +433,8 @@ mod tests {
             object_dir: "/tmp/test".into(),
             viewpoint: Transform::default(),
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: RenderConfig::tbp_default(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -404,6 +455,8 @@ mod tests {
             object_dir: "/tmp/test".into(),
             viewpoint: Transform::default(),
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: RenderConfig::tbp_default(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -422,6 +475,8 @@ mod tests {
             object_dir: "/tmp/test".into(),
             viewpoint: Transform::default(),
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: RenderConfig::tbp_default(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -443,6 +498,8 @@ mod tests {
             height: 2,
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform: Transform::default(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
             health: RenderHealth {
@@ -474,6 +531,8 @@ mod tests {
             object_dir: "/tmp/test".into(),
             viewpoint: camera_transform,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::new(0.125, 0.25, -0.5),
+            object_scale: Vec3::splat(1.25),
             render_config: RenderConfig::tbp_default(),
             target_point,
             targeting_policy: TargetingPolicy::MeshCenter,
@@ -486,6 +545,8 @@ mod tests {
             intrinsics: RenderConfig::tbp_default().intrinsics(),
             camera_transform,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::new(0.125, 0.25, -0.5),
+            object_scale: Vec3::splat(1.25),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -495,7 +556,17 @@ mod tests {
         assert_eq!(batch_output.target_point, target_point);
         assert_eq!(batch_output.targeting_policy, TargetingPolicy::MeshCenter);
         assert_eq!(batch_output.camera_transform, camera_transform);
+        assert_eq!(
+            batch_output.object_translation,
+            Vec3::new(0.125, 0.25, -0.5)
+        );
+        assert_eq!(batch_output.object_scale, Vec3::splat(1.25));
         assert_eq!(batch_output.request.target_point, target_point);
+        assert_eq!(
+            batch_output.request.object_translation,
+            Vec3::new(0.125, 0.25, -0.5)
+        );
+        assert_eq!(batch_output.request.object_scale, Vec3::splat(1.25));
         assert_eq!(
             batch_output.request.targeting_policy,
             TargetingPolicy::MeshCenter
@@ -509,6 +580,8 @@ mod tests {
             object_dir: "/tmp/test".into(),
             viewpoint: camera_transform,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             render_config: RenderConfig::tbp_default(),
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
@@ -525,6 +598,8 @@ mod tests {
             },
             camera_transform,
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };

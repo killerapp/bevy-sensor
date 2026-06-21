@@ -1227,6 +1227,8 @@ struct RenderRequest {
     texture_path: String,
     camera_transform: Transform,
     object_rotation: ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: RenderConfig,
 }
 
@@ -1295,6 +1297,8 @@ pub fn render_headless(
     object_dir: &Path,
     camera_transform: &Transform,
     object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: &RenderConfig,
 ) -> Result<RenderOutput, RenderError> {
     // Canonicalize paths so Bevy's asset server can find them regardless of
@@ -1326,6 +1330,8 @@ pub fn render_headless(
         texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
+        object_translation,
+        object_scale,
         config: config.clone(),
     };
 
@@ -1404,6 +1410,8 @@ pub fn render_headless_sequence(
     object_dir: &Path,
     viewpoints: &[Transform],
     object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: &RenderConfig,
 ) -> Result<Vec<RenderOutput>, RenderError> {
     if viewpoints.is_empty() {
@@ -1436,6 +1444,8 @@ pub fn render_headless_sequence(
         texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: viewpoints[0],
         object_rotation: object_rotation.clone(),
+        object_translation,
+        object_scale,
         config: config.clone(),
     };
 
@@ -1701,6 +1711,16 @@ fn serialize_output(output: &RenderOutput) -> Vec<u8> {
     data.extend_from_slice(&or.yaw.to_le_bytes());
     data.extend_from_slice(&or.roll.to_le_bytes());
 
+    // Object translation + scale (f32 for Bevy compatibility)
+    let ot = output.object_translation;
+    let os = output.object_scale;
+    data.extend_from_slice(&ot.x.to_le_bytes());
+    data.extend_from_slice(&ot.y.to_le_bytes());
+    data.extend_from_slice(&ot.z.to_le_bytes());
+    data.extend_from_slice(&os.x.to_le_bytes());
+    data.extend_from_slice(&os.y.to_le_bytes());
+    data.extend_from_slice(&os.z.to_le_bytes());
+
     data
 }
 
@@ -1764,6 +1784,18 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
     let yaw = read_f64(&data, &mut cursor);
     let roll = read_f64(&data, &mut cursor);
 
+    let (object_translation, object_scale) = if cursor + 24 <= data.len() {
+        let tx = read_f32(&data, &mut cursor);
+        let ty = read_f32(&data, &mut cursor);
+        let tz = read_f32(&data, &mut cursor);
+        let sx = read_f32(&data, &mut cursor);
+        let sy = read_f32(&data, &mut cursor);
+        let sz = read_f32(&data, &mut cursor);
+        (Vec3::new(tx, ty, tz), Vec3::new(sx, sy, sz))
+    } else {
+        (Vec3::ZERO, Vec3::ONE)
+    };
+
     Ok(RenderOutput {
         rgba,
         depth,
@@ -1780,6 +1812,8 @@ fn read_output_from_file(path: &std::path::Path) -> Result<RenderOutput, RenderE
             scale: Vec3::ONE,
         },
         object_rotation: ObjectRotation { pitch, yaw, roll },
+        object_translation,
+        object_scale,
         target_point: Vec3::ZERO,
         targeting_policy: TargetingPolicy::Origin,
     })
@@ -1865,10 +1899,12 @@ fn setup_scene(
         ..default()
     });
 
-    // Spawn the scene with rotation (Bevy 0.15+ uses SceneRoot)
+    // Spawn the scene with the requested object transform (Bevy 0.15+ uses SceneRoot)
     commands.spawn((
         SceneRoot(scene_handle),
-        Transform::from_rotation(request.object_rotation.to_quat()),
+        request
+            .object_rotation
+            .to_transform_with_translation_scale(request.object_translation, request.object_scale),
         RenderedObject,
     ));
 
@@ -2146,6 +2182,8 @@ fn extract_and_exit(
             intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
+            object_translation: request.object_translation,
+            object_scale: request.object_scale,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2289,10 +2327,12 @@ fn setup_headless_scene(
         ..default()
     });
 
-    // Spawn the scene with rotation
+    // Spawn the scene with the requested object transform
     commands.spawn((
         SceneRoot(scene_handle),
-        Transform::from_rotation(request.object_rotation.to_quat()),
+        request
+            .object_rotation
+            .to_transform_with_translation_scale(request.object_translation, request.object_scale),
         RenderedObject,
     ));
 
@@ -2514,6 +2554,8 @@ fn extract_and_exit_headless(
             intrinsics,
             camera_transform: request.camera_transform,
             object_rotation: request.object_rotation.clone(),
+            object_translation: request.object_translation,
+            object_scale: request.object_scale,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2595,6 +2637,8 @@ fn extract_and_continue_headless_batch(
                 .current_viewpoint()
                 .unwrap_or(request.camera_transform),
             object_rotation: request.object_rotation.clone(),
+            object_translation: request.object_translation,
+            object_scale: request.object_scale,
             target_point: Vec3::ZERO,
             targeting_policy: TargetingPolicy::Origin,
         };
@@ -2920,11 +2964,13 @@ impl RenderSession {
         for r in &requests[1..] {
             if r.object_dir != first.object_dir
                 || r.object_rotation != first.object_rotation
+                || r.object_translation != first.object_translation
+                || r.object_scale != first.object_scale
                 || r.render_config != first.render_config
             {
                 return Err(BatchRenderError::InvalidConfig(
                     "Phase 1 RenderSession::render requires homogeneous requests \
-                     (same object_dir, object_rotation, and render_config across the batch). \
+                     (same object_dir, object transform, and render_config across the batch). \
                      Call render() once per group instead."
                         .to_string(),
                 ));
@@ -2991,6 +3037,8 @@ impl RenderSession {
                 texture_path: fs_path_to_asset_string(&texture_path),
                 camera_transform: viewpoints[0],
                 object_rotation: first.object_rotation.clone(),
+                object_translation: first.object_translation,
+                object_scale: first.object_scale,
                 config: self.render_config.clone(),
             };
             world.insert_resource(new_request);
@@ -3009,7 +3057,10 @@ impl RenderSession {
             // render() call.
             world.spawn((
                 SceneRoot(scene_handle),
-                Transform::from_rotation(first.object_rotation.to_quat()),
+                first.object_rotation.to_transform_with_translation_scale(
+                    first.object_translation,
+                    first.object_scale,
+                ),
                 RenderedObject,
                 SessionScene,
             ));
@@ -3226,6 +3277,8 @@ impl PersistentRenderer {
             texture_path: fs_path_to_asset_string(&texture_path),
             camera_transform: Transform::default(),
             object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
             config: render_config.clone(),
         };
 
@@ -3241,7 +3294,8 @@ impl PersistentRenderer {
             world.insert_resource(initial_request);
             world.spawn((
                 SceneRoot(scene_handle),
-                Transform::from_rotation(ObjectRotation::identity().to_quat()),
+                ObjectRotation::identity()
+                    .to_transform_with_translation_scale(Vec3::ZERO, Vec3::ONE),
                 RenderedObject,
                 PersistentScene,
             ));
@@ -3286,6 +3340,17 @@ impl PersistentRenderer {
         camera_transform: &Transform,
         object_rotation: &ObjectRotation,
     ) -> Result<RenderOutput, crate::RenderError> {
+        self.render_with_object_transform(camera_transform, object_rotation, Vec3::ZERO, Vec3::ONE)
+    }
+
+    /// Render one frame with explicit object translation and scale.
+    pub fn render_with_object_transform(
+        &mut self,
+        camera_transform: &Transform,
+        object_rotation: &ObjectRotation,
+        object_translation: Vec3,
+        object_scale: Vec3,
+    ) -> Result<RenderOutput, crate::RenderError> {
         let camera_transform = *camera_transform;
         let object_rotation_owned = object_rotation.clone();
 
@@ -3301,7 +3366,8 @@ impl PersistentRenderer {
                 .next();
             if let Some(entity) = scene_entity {
                 if let Some(mut transform) = world.entity_mut(entity).get_mut::<Transform>() {
-                    *transform = Transform::from_rotation(object_rotation_owned.to_quat());
+                    *transform = object_rotation_owned
+                        .to_transform_with_translation_scale(object_translation, object_scale);
                 }
             }
 
@@ -3361,6 +3427,8 @@ impl PersistentRenderer {
                 let mut req = world.resource_mut::<RenderRequest>();
                 req.camera_transform = camera_transform;
                 req.object_rotation = object_rotation_owned.clone();
+                req.object_translation = object_translation;
+                req.object_scale = object_scale;
             }
 
             // Install fresh single-element batch with warmup frames so
@@ -3418,10 +3486,13 @@ impl PersistentRenderer {
 ///
 /// This function saves RGBA and depth data directly to files before exiting.
 /// Designed for subprocess rendering where the process will exit after rendering.
+#[allow(clippy::too_many_arguments)]
 pub fn render_to_files(
     object_dir: &Path,
     camera_transform: &Transform,
     object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
     config: &RenderConfig,
     rgba_path: &Path,
     depth_path: &Path,
@@ -3445,6 +3516,8 @@ pub fn render_to_files(
         texture_path: fs_path_to_asset_string(&texture_path),
         camera_transform: *camera_transform,
         object_rotation: object_rotation.clone(),
+        object_translation,
+        object_scale,
         config: config.clone(),
     };
 
@@ -3627,6 +3700,8 @@ f 5/1 2/3 1/4
                 object_dir: object_dir.clone(),
                 viewpoint,
                 object_rotation: ObjectRotation::identity(),
+                object_translation: Vec3::ZERO,
+                object_scale: Vec3::ONE,
                 render_config: config.clone(),
                 target_point: Vec3::ZERO,
                 targeting_policy: TargetingPolicy::Origin,

@@ -542,6 +542,8 @@ fn run_fixed_orbit(
                     object_dir: object_dir.clone(),
                     viewpoint: *viewpoint,
                     object_rotation: rotation.clone(),
+                    object_translation: Vec3::ZERO,
+                    object_scale: Vec3::ONE,
                     render_config: render_config.clone(),
                     target_point: targeted.target_point,
                     targeting_policy: targeted.policy.clone(),
