@@ -143,6 +143,21 @@ fn is_capture_foreground_depth(depth: f64, near: f64, far: f64) -> bool {
         && depth < far * DEPTH_CAPTURE_FAR_PLANE_FRACTION
 }
 
+fn is_all_background_depth(depth: &[f64], far: f64) -> bool {
+    !depth.is_empty()
+        && far.is_finite()
+        && depth
+            .iter()
+            .all(|value| value.is_finite() && *value >= far * DEPTH_CAPTURE_FAR_PLANE_FRACTION)
+}
+
+fn is_uniform_rgba_frame(rgba: &[u8]) -> bool {
+    let Some(first) = rgba.chunks_exact(4).next() else {
+        return false;
+    };
+    rgba.chunks_exact(4).all(|pixel| pixel == first)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct DepthReadbackSummary {
     samples: usize,
@@ -2528,19 +2543,29 @@ fn check_headless_capture_ready(
     // force as a true last resort to avoid hanging the watchdog.
     let force_accept = state.capture_retries > 150;
 
-    // RGBA: accept the first non-blank frame. Uniform clear-color frames are
-    // pre-geometry reads from the nondeterministic one-shot capture — reject and
-    // retry. The copier stays enabled until BOTH RGBA and depth are valid so a
-    // late/odd depth frame can still be captured.
+    let near = request.config.near_plane as f64;
+    let far = request.config.far_plane as f64;
+
+    // RGBA: accept the first stable non-blank frame. Uniform clear-color frames
+    // can be pre-geometry reads from the nondeterministic one-shot capture, but
+    // they are also legitimate off-target renders. Accept a stable blank frame
+    // only when the depth side has already shown a stable all-background buffer.
+    // The copier stays enabled until BOTH RGBA and depth are valid so a late/odd
+    // depth frame can still be captured.
     if state.rgba_data.is_none() {
         let captured_rgba = shared_rgba.0.lock().ok().and_then(|mut g| g.take());
         if let Some((rgba_data, width, height)) = captured_rgba {
-            let non_blank = rgba_data
-                .chunks_exact(4)
-                .any(|px| px[0..3] != rgba_data[0..3]);
+            let blank = is_uniform_rgba_frame(&rgba_data);
+            let non_blank = !blank;
             // Stable == identical to the previous readback (render has settled).
             let stable = state.prev_rgba.as_deref() == Some(rgba_data.as_slice());
-            if (non_blank && stable) || force_accept {
+            let stable_empty_view = blank
+                && stable
+                && state
+                    .prev_depth
+                    .as_deref()
+                    .is_some_and(|depth| is_all_background_depth(depth, far));
+            if (non_blank && stable) || stable_empty_view || force_accept {
                 state.image_width = width;
                 state.image_height = height;
                 state.rgba_data = Some(rgba_data);
@@ -2557,8 +2582,6 @@ fn check_headless_capture_ready(
     if state.depth_data.is_none() {
         let captured_depth = shared_depth.0.lock().ok().and_then(|mut g| g.take());
         if let Some((depth_data, _w, _h)) = captured_depth {
-            let near = request.config.near_plane as f64;
-            let far = request.config.far_plane as f64;
             // Require a real object-surface depth, not just any non-far value:
             // near-plane garbage (~configured near plane) is not a valid surface,
             // but TBP surface policies legitimately work close to the object
@@ -2569,7 +2592,13 @@ fn check_headless_capture_ready(
                 .any(|&depth| is_capture_foreground_depth(depth, near, far));
             // Settled == identical to the previous depth readback.
             let stable = state.prev_depth.as_deref() == Some(depth_data.as_slice());
-            if has_foreground && stable {
+            let stable_empty_view = stable
+                && is_all_background_depth(&depth_data, far)
+                && state
+                    .rgba_data
+                    .as_deref()
+                    .is_some_and(is_uniform_rgba_frame);
+            if (has_foreground && stable) || stable_empty_view {
                 state.depth_data = Some(depth_data);
                 state.prev_depth = None;
             } else {
@@ -2579,17 +2608,14 @@ fn check_headless_capture_ready(
     }
 
     // Last-resort fallback so we never hang the watchdog: once RGBA is in hand
-    // and we've retried a lot, fill a uniform camera-distance depth placeholder.
+    // and we've retried a lot, fill a uniform far-plane/background placeholder.
     //
-    // This is NOT a valid render — it is a flat depth plane that extracts
-    // features and passes buffer-equality parity tests yet unprojects every
-    // pixel onto one sheet, silently cratering downstream spatial matching
-    // (this exact fallback masked the Bevy 0.18 depth regression in #92). It
-    // must therefore be LOUD: a future depth-readback regression has to surface
-    // in logs/CI instead of looking like a successful render. `tests/
-    // spatial_parity.rs` is the geometric guard for the same failure.
+    // This is NOT a valid object render; it is an all-background depth buffer
+    // that downstream callers should treat as no surface. It must therefore be
+    // LOUD: a future depth-readback regression has to surface in logs/CI instead
+    // of looking like a successful render. `tests/spatial_parity.rs` is the
+    // geometric guard for the old fake-surface failure.
     if state.rgba_data.is_some() && state.depth_data.is_none() && force_accept {
-        let camera_dist = request.camera_transform.translation.length() as f64;
         let pixel_count = (state.image_width * state.image_height) as usize;
         let depth_summary = state
             .prev_depth
@@ -2608,15 +2634,15 @@ fn check_headless_capture_ready(
         let object_rotation = &request.object_rotation;
         eprintln!(
             "[bevy-sensor][WARN] depth readback produced no valid frame after {} retries; \
-             falling back to a UNIFORM {:.4} m camera-distance plane. This is a degraded \
-             render (flat depth -> no real 3D geometry) and indicates a depth-readback \
-             regression. request mesh={} image={}x{} camera_t=[{:.4},{:.4},{:.4}] \
+             falling back to a UNIFORM {:.4} m far-plane background. This is a degraded \
+             render (no real 3D geometry) and indicates a depth-readback regression. \
+             request mesh={} image={}x{} camera_t=[{:.4},{:.4},{:.4}] \
              camera_q_xyzw=[{:.6},{:.6},{:.6},{:.6}] object_rot_deg=[{:.3},{:.3},{:.3}] \
              object_t=[{:.4},{:.4},{:.4}] object_scale=[{:.4},{:.4},{:.4}] \
              last_rejected_depth=({}). See render.rs DepthReadbackNode and \
              tests/spatial_parity.rs.",
             state.capture_retries,
-            camera_dist,
+            far,
             request.mesh_path,
             state.image_width,
             state.image_height,
@@ -2638,7 +2664,7 @@ fn check_headless_capture_ready(
             request.object_scale.z,
             depth_summary
         );
-        state.depth_data = Some(vec![camera_dist; pixel_count]);
+        state.depth_data = Some(vec![far; pixel_count]);
     }
 
     let rgba_ready = state.rgba_data.is_some();
@@ -3784,7 +3810,10 @@ fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod depth_readback_summary_tests {
-    use super::{is_capture_foreground_depth, DepthReadbackSummary};
+    use super::{
+        is_all_background_depth, is_capture_foreground_depth, is_uniform_rgba_frame,
+        DepthReadbackSummary,
+    };
 
     #[test]
     fn capture_foreground_depth_matches_persistent_capture_gate() {
@@ -3842,6 +3871,22 @@ mod depth_readback_summary_tests {
         assert_eq!(summary.foreground, 1);
         assert_eq!(summary.min, Some(0.2));
         assert_eq!(summary.max, Some(0.2));
+    }
+
+    #[test]
+    fn all_background_depth_accepts_far_plane_only() {
+        assert!(is_all_background_depth(&[10.0, 9.99], 10.0));
+        assert!(!is_all_background_depth(&[10.0, 9.98], 10.0));
+        assert!(!is_all_background_depth(&[10.0, 0.010005], 10.0));
+        assert!(!is_all_background_depth(&[10.0, f64::NAN], 10.0));
+        assert!(!is_all_background_depth(&[], 10.0));
+    }
+
+    #[test]
+    fn uniform_rgba_frame_detects_blank_readbacks() {
+        assert!(is_uniform_rgba_frame(&[1, 2, 3, 255, 1, 2, 3, 255]));
+        assert!(!is_uniform_rgba_frame(&[1, 2, 3, 255, 4, 2, 3, 255]));
+        assert!(!is_uniform_rgba_frame(&[]));
     }
 }
 
