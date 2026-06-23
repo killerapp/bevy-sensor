@@ -1361,8 +1361,16 @@ pub fn render_to_buffer_with_target(
     target_point: Vec3,
     targeting_policy: TargetingPolicy,
 ) -> Result<RenderOutput, RenderError> {
-    render_to_buffer(object_dir, camera_transform, object_rotation, config)
-        .map(|output| output.with_targeting(target_point, targeting_policy))
+    render::render_headless_with_target(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        Vec3::ZERO,
+        Vec3::ONE,
+        config,
+        target_point,
+        targeting_policy,
+    )
 }
 
 /// Render a YCB object with explicit object transform and target metadata.
@@ -1377,15 +1385,16 @@ pub fn render_to_buffer_with_target_and_object_transform(
     target_point: Vec3,
     targeting_policy: TargetingPolicy,
 ) -> Result<RenderOutput, RenderError> {
-    render_to_buffer_with_object_transform(
+    render::render_headless_with_target(
         object_dir,
         camera_transform,
         object_rotation,
         object_translation,
         object_scale,
         config,
+        target_point,
+        targeting_policy,
     )
-    .map(|output| output.with_targeting(target_point, targeting_policy))
 }
 
 /// Render all viewpoints and rotations for a YCB object.
@@ -1902,6 +1911,8 @@ pub fn render_batch(
             first_request.object_translation,
             first_request.object_scale,
             &first_request.render_config,
+            first_request.target_point,
+            first_request.targeting_policy.clone(),
         )?;
 
         return Ok(requests
@@ -1938,6 +1949,8 @@ fn requests_share_batch_context(requests: &[BatchRenderRequest]) -> bool {
             && request.object_translation == first.object_translation
             && request.object_scale == first.object_scale
             && request.render_config == first.render_config
+            && request.target_point == first.target_point
+            && request.targeting_policy == first.targeting_policy
     })
 }
 
