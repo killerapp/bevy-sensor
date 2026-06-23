@@ -42,7 +42,7 @@ fn persistent_workload_counts_per_step_frames() {
 fn neocortx_targeting_policy_matches_current_downstream_behavior() {
     assert_eq!(
         neocortx_targeting_policy(&ObjectRotation::new(0.0, 90.0, 0.0)),
-        TargetingPolicy::Origin
+        TargetingPolicy::MeshCenter
     );
     assert_eq!(
         neocortx_targeting_policy(&ObjectRotation::new(45.0, 90.0, 0.0)),

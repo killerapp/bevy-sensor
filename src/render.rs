@@ -1347,6 +1347,74 @@ struct RenderRequest {
     object_translation: Vec3,
     object_scale: Vec3,
     config: RenderConfig,
+    target_point: Vec3,
+    targeting_policy: TargetingPolicy,
+}
+
+impl RenderRequest {
+    fn target_projects_in_frame(&self) -> bool {
+        if matches!(self.targeting_policy, TargetingPolicy::Origin) {
+            return false;
+        }
+
+        target_projects_in_frame(self.target_point, &self.camera_transform, &self.config)
+    }
+
+    fn accepts_stable_empty_view(&self) -> bool {
+        !self.target_projects_in_frame()
+    }
+}
+
+fn target_projects_in_frame(
+    world_point: Vec3,
+    camera_transform: &Transform,
+    config: &RenderConfig,
+) -> bool {
+    let local = camera_transform.rotation.inverse() * (world_point - camera_transform.translation);
+    let Some([x, y]) = project_camera_local(local, config) else {
+        return false;
+    };
+
+    x >= 0.0 && x < config.width as f64 && y >= 0.0 && y < config.height as f64
+}
+
+fn project_camera_local(local: Vec3, config: &RenderConfig) -> Option<[f64; 2]> {
+    if local.z >= 0.0 {
+        return None;
+    }
+
+    let depth = -local.z as f64;
+    let intrinsics = config.intrinsics();
+    let x = (local.x as f64 / depth) * intrinsics.focal_length[0] + intrinsics.principal_point[0];
+    let y = (-local.y as f64 / depth) * intrinsics.focal_length[1] + intrinsics.principal_point[1];
+    Some([x, y])
+}
+
+fn reject_all_background_target_in_frame(
+    output: &RenderOutput,
+    config: &RenderConfig,
+) -> Result<(), RenderError> {
+    if matches!(output.targeting_policy, TargetingPolicy::Origin) {
+        return Ok(());
+    }
+
+    if !target_projects_in_frame(output.target_point, &output.camera_transform, config) {
+        return Ok(());
+    }
+
+    if is_all_background_depth(&output.depth, config.far_plane as f64) {
+        return Err(RenderError::RenderFailed(format!(
+            "all-background target-in-frame render for target_policy={} target=[{:.6},{:.6},{:.6}] image={}x{}",
+            output.targeting_policy.label(),
+            output.target_point.x,
+            output.target_point.y,
+            output.target_point.z,
+            output.width,
+            output.height
+        )));
+    }
+
+    Ok(())
 }
 
 /// Marker for the rendered object
@@ -1418,6 +1486,29 @@ pub fn render_headless(
     object_scale: Vec3,
     config: &RenderConfig,
 ) -> Result<RenderOutput, RenderError> {
+    render_headless_with_target(
+        object_dir,
+        camera_transform,
+        object_rotation,
+        object_translation,
+        object_scale,
+        config,
+        Vec3::ZERO,
+        TargetingPolicy::Origin,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_headless_with_target(
+    object_dir: &Path,
+    camera_transform: &Transform,
+    object_rotation: &ObjectRotation,
+    object_translation: Vec3,
+    object_scale: Vec3,
+    config: &RenderConfig,
+    target_point: Vec3,
+    targeting_policy: TargetingPolicy,
+) -> Result<RenderOutput, RenderError> {
     // Canonicalize paths so Bevy's asset server can find them regardless of
     // caller working directory. Relative paths like "../../ycb" pass the
     // exists() check but Bevy resolves assets against its own root.
@@ -1450,6 +1541,8 @@ pub fn render_headless(
         object_translation,
         object_scale,
         config: config.clone(),
+        target_point,
+        targeting_policy: targeting_policy.clone(),
     };
 
     let shared_output: SharedOutput = SharedOutput(Arc::new(Mutex::new(None)));
@@ -1502,6 +1595,7 @@ pub fn render_headless(
     // App::run() returned - check shared_output for result
     if let Ok(guard) = shared_output.0.lock() {
         if let Some(output) = guard.as_ref() {
+            reject_all_background_target_in_frame(output, config)?;
             return Ok(output.clone());
         }
     }
@@ -1510,6 +1604,8 @@ pub fn render_headless(
     if temp_path.exists() {
         if let Ok(output) = read_output_from_file(&temp_path) {
             let _ = std::fs::remove_file(&temp_path);
+            let output = output.with_targeting(target_point, targeting_policy);
+            reject_all_background_target_in_frame(&output, config)?;
             return Ok(output);
         }
     }
@@ -1523,6 +1619,7 @@ pub fn render_headless(
 ///
 /// All captures share the same object, object rotation, and render configuration.
 /// This is the fast path used by the batch API for episode-style workloads.
+#[allow(clippy::too_many_arguments)]
 pub fn render_headless_sequence(
     object_dir: &Path,
     viewpoints: &[Transform],
@@ -1530,6 +1627,8 @@ pub fn render_headless_sequence(
     object_translation: Vec3,
     object_scale: Vec3,
     config: &RenderConfig,
+    target_point: Vec3,
+    targeting_policy: TargetingPolicy,
 ) -> Result<Vec<RenderOutput>, RenderError> {
     if viewpoints.is_empty() {
         return Ok(Vec::new());
@@ -1564,6 +1663,8 @@ pub fn render_headless_sequence(
         object_translation,
         object_scale,
         config: config.clone(),
+        target_point,
+        targeting_policy,
     };
 
     let shared_rgba: SharedRgbaBuffer = SharedRgbaBuffer::default();
@@ -1708,6 +1809,10 @@ pub fn render_headless_sequence(
             batch.outputs.len(),
             viewpoints.len()
         )));
+    }
+
+    for output in &batch.outputs {
+        reject_all_background_target_in_frame(output, config)?;
     }
 
     Ok(std::mem::take(&mut batch.outputs))
@@ -2301,8 +2406,8 @@ fn extract_and_exit(
             object_rotation: request.object_rotation.clone(),
             object_translation: request.object_translation,
             object_scale: request.object_scale,
-            target_point: Vec3::ZERO,
-            targeting_policy: TargetingPolicy::Origin,
+            target_point: request.target_point,
+            targeting_policy: request.targeting_policy.clone(),
         };
 
         if let Ok(mut guard) = shared_output.0.lock() {
@@ -2564,7 +2669,8 @@ fn check_headless_capture_ready(
                 && state
                     .prev_depth
                     .as_deref()
-                    .is_some_and(|depth| is_all_background_depth(depth, far));
+                    .is_some_and(|depth| is_all_background_depth(depth, far))
+                && request.accepts_stable_empty_view();
             if (non_blank && stable) || stable_empty_view || force_accept {
                 state.image_width = width;
                 state.image_height = height;
@@ -2597,7 +2703,8 @@ fn check_headless_capture_ready(
                 && state
                     .rgba_data
                     .as_deref()
-                    .is_some_and(is_uniform_rgba_frame);
+                    .is_some_and(is_uniform_rgba_frame)
+                && request.accepts_stable_empty_view();
             if (has_foreground && stable) || stable_empty_view {
                 state.depth_data = Some(depth_data);
                 state.prev_depth = None;
@@ -2632,6 +2739,13 @@ fn check_headless_capture_ready(
         let camera_translation = request.camera_transform.translation;
         let camera_rotation = request.camera_transform.rotation;
         let object_rotation = &request.object_rotation;
+        let target_local = request.camera_transform.rotation.inverse()
+            * (request.target_point - request.camera_transform.translation);
+        let target_projection = project_camera_local(target_local, &request.config);
+        let target_projection_text = target_projection
+            .map(|[x, y]| format!("[{x:.3},{y:.3}]"))
+            .unwrap_or_else(|| "none".to_string());
+        let target_in_frame = request.target_projects_in_frame();
         eprintln!(
             "[bevy-sensor][WARN] depth readback produced no valid frame after {} retries; \
              falling back to a UNIFORM {:.4} m far-plane background. This is a degraded \
@@ -2639,6 +2753,8 @@ fn check_headless_capture_ready(
              request mesh={} image={}x{} camera_t=[{:.4},{:.4},{:.4}] \
              camera_q_xyzw=[{:.6},{:.6},{:.6},{:.6}] object_rot_deg=[{:.3},{:.3},{:.3}] \
              object_t=[{:.4},{:.4},{:.4}] object_scale=[{:.4},{:.4},{:.4}] \
+             target_policy={} target=[{:.6},{:.6},{:.6}] target_camera_local=[{:.6},{:.6},{:.6}] \
+             target_projection_px={} target_in_frame={} classification={} \
              last_rejected_depth=({}). See render.rs DepthReadbackNode and \
              tests/spatial_parity.rs.",
             state.capture_retries,
@@ -2662,6 +2778,20 @@ fn check_headless_capture_ready(
             request.object_scale.x,
             request.object_scale.y,
             request.object_scale.z,
+            request.targeting_policy.label(),
+            request.target_point.x,
+            request.target_point.y,
+            request.target_point.z,
+            target_local.x,
+            target_local.y,
+            target_local.z,
+            target_projection_text,
+            target_in_frame,
+            if target_in_frame {
+                "AllBackgroundTargetInFrame"
+            } else {
+                "AllBackgroundEmptyView"
+            },
             depth_summary
         );
         state.depth_data = Some(vec![far; pixel_count]);
@@ -2729,8 +2859,8 @@ fn extract_and_exit_headless(
             object_rotation: request.object_rotation.clone(),
             object_translation: request.object_translation,
             object_scale: request.object_scale,
-            target_point: Vec3::ZERO,
-            targeting_policy: TargetingPolicy::Origin,
+            target_point: request.target_point,
+            targeting_policy: request.targeting_policy.clone(),
         };
 
         if let Ok(mut guard) = shared_output.0.lock() {
@@ -2759,7 +2889,7 @@ fn tick_headless_batch_warmup(batch: Option<ResMut<HeadlessBatchSequence>>) {
 /// Extract one batch output and continue rendering the next viewpoint in the same app.
 fn extract_and_continue_headless_batch(
     mut state: ResMut<RenderState>,
-    request: Res<RenderRequest>,
+    mut request: ResMut<RenderRequest>,
     buffers: (Res<SharedRgbaBuffer>, Res<SharedDepthBuffer>),
     batch: Option<ResMut<HeadlessBatchSequence>>,
     mut camera_query: Query<&mut Transform, With<RenderCamera>>,
@@ -2812,8 +2942,8 @@ fn extract_and_continue_headless_batch(
             object_rotation: request.object_rotation.clone(),
             object_translation: request.object_translation,
             object_scale: request.object_scale,
-            target_point: Vec3::ZERO,
-            targeting_policy: TargetingPolicy::Origin,
+            target_point: request.target_point,
+            targeting_policy: request.targeting_policy.clone(),
         };
         batch.outputs.push(output);
 
@@ -2828,6 +2958,7 @@ fn extract_and_continue_headless_batch(
         batch.warmup_frames_remaining = BATCH_WARMUP_FRAMES;
 
         if let Some(next_viewpoint) = batch.current_viewpoint() {
+            request.camera_transform = next_viewpoint;
             for mut camera_transform in camera_query.iter_mut() {
                 *camera_transform = next_viewpoint;
             }
@@ -3213,6 +3344,8 @@ impl RenderSession {
                 object_translation: first.object_translation,
                 object_scale: first.object_scale,
                 config: self.render_config.clone(),
+                target_point: first.target_point,
+                targeting_policy: first.targeting_policy.clone(),
             };
             world.insert_resource(new_request);
 
@@ -3457,6 +3590,8 @@ impl PersistentRenderer {
             object_translation: Vec3::ZERO,
             object_scale: Vec3::ONE,
             config: render_config.clone(),
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::Origin,
         };
 
         {
@@ -3529,6 +3664,24 @@ impl PersistentRenderer {
         self.render_with_object_transform(camera_transform, object_rotation, Vec3::ZERO, Vec3::ONE)
     }
 
+    /// Render one frame with target metadata available during capture readiness checks.
+    pub fn render_with_target(
+        &mut self,
+        camera_transform: &Transform,
+        object_rotation: &ObjectRotation,
+        target_point: Vec3,
+        targeting_policy: TargetingPolicy,
+    ) -> Result<RenderOutput, crate::RenderError> {
+        self.render_with_target_and_object_transform(
+            camera_transform,
+            object_rotation,
+            Vec3::ZERO,
+            Vec3::ONE,
+            target_point,
+            targeting_policy,
+        )
+    }
+
     /// Render one frame with explicit object translation and scale.
     pub fn render_with_object_transform(
         &mut self,
@@ -3537,8 +3690,29 @@ impl PersistentRenderer {
         object_translation: Vec3,
         object_scale: Vec3,
     ) -> Result<RenderOutput, crate::RenderError> {
+        self.render_with_target_and_object_transform(
+            camera_transform,
+            object_rotation,
+            object_translation,
+            object_scale,
+            Vec3::ZERO,
+            TargetingPolicy::Origin,
+        )
+    }
+
+    /// Render one frame with explicit object transform and target metadata.
+    pub fn render_with_target_and_object_transform(
+        &mut self,
+        camera_transform: &Transform,
+        object_rotation: &ObjectRotation,
+        object_translation: Vec3,
+        object_scale: Vec3,
+        target_point: Vec3,
+        targeting_policy: TargetingPolicy,
+    ) -> Result<RenderOutput, crate::RenderError> {
         let camera_transform = *camera_transform;
         let object_rotation_owned = object_rotation.clone();
+        let target_policy_owned = targeting_policy.clone();
 
         {
             let world = self.app.world_mut();
@@ -3615,6 +3789,8 @@ impl PersistentRenderer {
                 req.object_rotation = object_rotation_owned.clone();
                 req.object_translation = object_translation;
                 req.object_scale = object_scale;
+                req.target_point = target_point;
+                req.targeting_policy = target_policy_owned.clone();
             }
 
             // Install fresh single-element batch with warmup frames so
@@ -3648,7 +3824,11 @@ impl PersistentRenderer {
             )));
         }
 
-        Ok(outputs.remove(0))
+        let output = outputs
+            .remove(0)
+            .with_targeting(target_point, targeting_policy);
+        reject_all_background_target_in_frame(&output, &self.render_config)?;
+        Ok(output)
     }
 
     /// Path to the YCB object directory this renderer was bound to.
@@ -3705,6 +3885,8 @@ pub fn render_to_files(
         object_translation,
         object_scale,
         config: config.clone(),
+        target_point: Vec3::ZERO,
+        targeting_policy: TargetingPolicy::Origin,
     };
 
     // Shared state for output
@@ -3812,8 +3994,10 @@ fn save_depth_to_binary(depth: &[f64], path: &Path) -> Result<(), String> {
 mod depth_readback_summary_tests {
     use super::{
         is_all_background_depth, is_capture_foreground_depth, is_uniform_rgba_frame,
-        DepthReadbackSummary,
+        project_camera_local, reject_all_background_target_in_frame, target_projects_in_frame,
+        DepthReadbackSummary, RenderRequest,
     };
+    use crate::{ObjectRotation, RenderConfig, RenderOutput, TargetingPolicy, Transform, Vec3};
 
     #[test]
     fn capture_foreground_depth_matches_persistent_capture_gate() {
@@ -3887,6 +4071,85 @@ mod depth_readback_summary_tests {
         assert!(is_uniform_rgba_frame(&[1, 2, 3, 255, 1, 2, 3, 255]));
         assert!(!is_uniform_rgba_frame(&[1, 2, 3, 255, 4, 2, 3, 255]));
         assert!(!is_uniform_rgba_frame(&[]));
+    }
+
+    #[test]
+    fn target_projection_matches_center_pixel_for_targeted_camera() {
+        let config = RenderConfig::tbp_default();
+        let camera =
+            Transform::from_translation(Vec3::new(0.0, 0.0, 0.5)).looking_at(Vec3::ZERO, Vec3::Y);
+
+        let projected = project_camera_local(Vec3::new(0.0, 0.0, -0.5), &config)
+            .expect("target in front of camera");
+        assert!((projected[0] - 32.0).abs() < 1e-9);
+        assert!((projected[1] - 32.0).abs() < 1e-9);
+        assert!(target_projects_in_frame(Vec3::ZERO, &camera, &config));
+    }
+
+    #[test]
+    fn target_aware_requests_reject_stable_empty_view_when_target_is_in_frame() {
+        let config = RenderConfig::tbp_default();
+        let camera =
+            Transform::from_translation(Vec3::new(0.0, 0.0, 0.5)).looking_at(Vec3::ZERO, Vec3::Y);
+
+        let mut request = RenderRequest {
+            mesh_path: "mesh.obj".to_string(),
+            texture_path: "texture.png".to_string(),
+            camera_transform: camera,
+            object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
+            config,
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::MeshCenter,
+        };
+
+        assert!(!request.accepts_stable_empty_view());
+
+        request.targeting_policy = TargetingPolicy::Origin;
+        assert!(request.accepts_stable_empty_view());
+
+        request.targeting_policy = TargetingPolicy::MeshCenter;
+        request.target_point = Vec3::new(5.0, 0.0, 0.0);
+        assert!(request.accepts_stable_empty_view());
+    }
+
+    #[test]
+    fn target_aware_outputs_error_on_all_background_target_in_frame() {
+        let config = RenderConfig {
+            width: 2,
+            height: 2,
+            ..RenderConfig::tbp_default()
+        };
+        let camera =
+            Transform::from_translation(Vec3::new(0.0, 0.0, 0.5)).looking_at(Vec3::ZERO, Vec3::Y);
+        let output = RenderOutput {
+            rgba: vec![0; 2 * 2 * 4],
+            depth: vec![config.far_plane as f64; 2 * 2],
+            width: config.width,
+            height: config.height,
+            intrinsics: config.intrinsics(),
+            camera_transform: camera,
+            object_rotation: ObjectRotation::identity(),
+            object_translation: Vec3::ZERO,
+            object_scale: Vec3::ONE,
+            target_point: Vec3::ZERO,
+            targeting_policy: TargetingPolicy::MeshCenter,
+        };
+
+        let error = reject_all_background_target_in_frame(&output, &config)
+            .expect_err("target-in-frame all-background should be rejected");
+        assert!(error.to_string().contains("all-background target-in-frame"));
+
+        let mut foreground = output.clone();
+        foreground.depth[0] = 0.5;
+        reject_all_background_target_in_frame(&foreground, &config)
+            .expect("foreground target-aware output should pass");
+
+        let mut origin = output;
+        origin.targeting_policy = TargetingPolicy::Origin;
+        reject_all_background_target_in_frame(&origin, &config)
+            .expect("origin-targeted empty views remain compatibility-accepted");
     }
 }
 

@@ -91,14 +91,10 @@ pub fn fixed_orbit_frame_count(
 
 /// Current NeoCortx targeting behavior for fixed-orbit YCB episodes.
 ///
-/// Yaw-only rotations preserve the historical origin orbit. Pitched or rolled
-/// rotations target the rotated mesh center so the object stays in frame.
-pub fn neocortx_targeting_policy(rotation: &ObjectRotation) -> TargetingPolicy {
-    if rotation.pitch.abs() > f64::EPSILON || rotation.roll.abs() > f64::EPSILON {
-        TargetingPolicy::MeshCenter
-    } else {
-        TargetingPolicy::Origin
-    }
+/// NeoCortx uses the rotated mesh center for all fixed-orbit rotations so
+/// object-centered YCB views stay comparable across yaw-only and tilted poses.
+pub fn neocortx_targeting_policy(_rotation: &ObjectRotation) -> TargetingPolicy {
+    TargetingPolicy::MeshCenter
 }
 
 /// Convert a duration to milliseconds as f64.

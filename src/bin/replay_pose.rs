@@ -4,8 +4,9 @@
 //! caller already has an exact `camera_t` + `camera_q_xyzw` from bevy-sensor logs.
 
 use bevy_sensor::{
-    load_ycb_mesh_bounds, render_to_buffer, rotated_mesh_center, ObjectRotation,
-    PersistentRenderer, Quat, RenderConfig, RenderHealth, Transform, Vec3,
+    load_ycb_mesh_bounds, render_to_buffer, render_to_buffer_with_target, rotated_mesh_center,
+    ObjectRotation, PersistentRenderer, Quat, RenderConfig, RenderHealth, TargetingPolicy,
+    Transform, Vec3,
 };
 use serde::Serialize;
 use std::env;
@@ -92,7 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &camera_transform,
         &config,
     )];
-    if let Ok(bounds) = load_ycb_mesh_bounds(&object_dir) {
+    let target_metadata = load_ycb_mesh_bounds(&object_dir).ok().map(|bounds| {
         let mesh_center = rotated_mesh_center(bounds.center, &options.object_rotation);
         target_diagnostics.push(target_diagnostic(
             "rotated_mesh_center",
@@ -100,17 +101,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             &camera_transform,
             &config,
         ));
-    }
+        (mesh_center, TargetingPolicy::MeshCenter)
+    });
 
     let one_shot = if matches!(options.path, ReplayPath::Both | ReplayPath::OneShot) {
         let mut frames = Vec::with_capacity(options.repeat);
         for iteration in 0..options.repeat {
-            let output = render_to_buffer(
-                &object_dir,
-                &camera_transform,
-                &options.object_rotation,
-                &config,
-            )?;
+            let output = if let Some((target_point, targeting_policy)) = &target_metadata {
+                render_to_buffer_with_target(
+                    &object_dir,
+                    &camera_transform,
+                    &options.object_rotation,
+                    &config,
+                    *target_point,
+                    targeting_policy.clone(),
+                )?
+            } else {
+                render_to_buffer(
+                    &object_dir,
+                    &camera_transform,
+                    &options.object_rotation,
+                    &config,
+                )?
+            };
             frames.push(frame_report(
                 iteration,
                 &output.health_with_far_plane(config.far_plane as f64),
@@ -130,7 +143,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut renderer = PersistentRenderer::new(&object_dir, &config)?;
         let mut frames = Vec::with_capacity(options.repeat);
         for iteration in 0..options.repeat {
-            let output = renderer.render(&camera_transform, &options.object_rotation)?;
+            let output = if let Some((target_point, targeting_policy)) = &target_metadata {
+                renderer.render_with_target(
+                    &camera_transform,
+                    &options.object_rotation,
+                    *target_point,
+                    targeting_policy.clone(),
+                )?
+            } else {
+                renderer.render(&camera_transform, &options.object_rotation)?
+            };
             frames.push(frame_report(
                 iteration,
                 &output.health_with_far_plane(config.far_plane as f64),
